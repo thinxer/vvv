@@ -1,0 +1,49 @@
+--- a/src/server_linux/media.rs
++++ b/src/server_linux/media.rs
+@@ -345,6 +345,26 @@
+     },
+ }
+ 
++/// Query the connected socket so tunnel routes use their actual MTU.
++fn video_payload_limit(sock: &UdpSocket, peer: SocketAddr) -> usize {
++    use std::os::fd::AsRawFd;
++    let v4 = peer.ip().to_canonical().is_ipv4();
++    let (level, option) = if sock.local_addr().is_ok_and(|a| a.is_ipv6()) {
++        (libc::IPPROTO_IPV6, libc::IPV6_MTU)
++    } else {
++        (libc::IPPROTO_IP, libc::IP_MTU)
++    };
++    let mut mtu: libc::c_int = 0;
++    let mut len = std::mem::size_of_val(&mtu) as libc::socklen_t;
++    let result = unsafe {
++        libc::getsockopt(sock.as_raw_fd(), level, option, (&mut mtu as *mut libc::c_int).cast(), &mut len)
++    };
++    let path_mtu = if result == 0 && mtu >= 128 { mtu as usize } else { 1280 };
++    // The packetizer adds five FU bytes after splitting the NAL into chunks.
++    let overhead = (if v4 {20} else {40}) + 8 + 20 + srtp::TAG_LEN + 5;
++    (path_mtu - overhead).min(crate::hp::packetizer::DEFAULT_MTU_PAYLOAD)
++}
++
+ pub(super) fn run_media(p: MediaParams, stop: &AtomicBool) -> Result<MediaEnd> {
+     let sock = UdpSocket::bind(p.bind)
+         .with_context(|| format!("binding UDP {}", p.port))?;
+@@ -425,15 +445,13 @@
+     enc.set_stream_output(frame_tx.clone());
+     ack_timing::enable(&sock)?;
+     let sent = Arc::new(Mutex::new(SentTiles::new()));
++    let mut packet_config = PacketizerConfig::new(p.ssrc, p.payload_type, p.tiles, (w as u16, h as u16));
++    packet_config.mtu_payload = video_payload_limit(&sock, peer);
++    info!(payload_limit = packet_config.mtu_payload, "HP video packet sizing");
+     let sender = Sender {
+         sent: sent.clone(),
+         sock: sock.try_clone()?,
+-        pk: Packetizer::new(PacketizerConfig::new(
+-            p.ssrc,
+-            p.payload_type,
+-            p.tiles,
+-            (w as u16, h as u16),
+-        )),
++        pk: Packetizer::new(packet_config),
+         tx: SrtpContext::new(&p.send_key),
+         ssrc: p.ssrc,
+         remote_ssrc: p.remote_ssrc,

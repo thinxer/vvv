@@ -1,0 +1,10 @@
+[package]
+name = "vvv-session"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+cuda-scanout = { path = "../cuda-scanout" }
+tokio = { version = "1", features = ["sync"] }

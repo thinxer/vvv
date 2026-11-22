@@ -1,0 +1,52 @@
+{
+  "name": "Crosvm Virtio Tablet 0",
+  "serial_name": "virtio-tablet-0",
+  "properties": {},
+  "events": [
+    {
+      "event_type": "EV_KEY",
+      "event_type_code": 1,
+      "supported_events": {
+        "BTN_LEFT": 272,
+        "BTN_RIGHT": 273,
+        "BTN_MIDDLE": 274,
+        "BTN_SIDE": 275,
+        "BTN_EXTRA": 276
+      }
+    },
+    {
+      "event_type": "EV_REL",
+      "event_type_code": 2,
+      "supported_events": {
+        "REL_HWHEEL": 6,
+        "REL_WHEEL": 8
+      }
+    },
+    {
+      "event_type": "EV_ABS",
+      "event_type_code": 3,
+      "supported_events": {
+        "ABS_X": 0,
+        "ABS_Y": 1
+      }
+    }
+  ],
+  "axis_info": [
+    {
+      "axis": "ABS_X",
+      "axis_code": 0,
+      "min": 0,
+      "max": 32767,
+      "fuzz": 0,
+      "flat": 0
+    },
+    {
+      "axis": "ABS_Y",
+      "axis_code": 1,
+      "min": 0,
+      "max": 32767,
+      "fuzz": 0,
+      "flat": 0
+    }
+  ]
+}

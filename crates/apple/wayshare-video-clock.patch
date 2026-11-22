@@ -1,0 +1,41 @@
+--- a/src/server_linux/media.rs
++++ b/src/server_linux/media.rs
+@@ -197,7 +197,6 @@
+     ts_offset: u32,
+     packets: u32,
+     octets: u32,
+-    rtp_ts: u32,
+     last_sr: Instant,
+     stats: Arc<Mutex<SendStats>>,
+     send_errors_logged: u32,
+@@ -222,7 +221,7 @@
+                     self.ssrc,
+                     self.remote_ssrc,
+                     rtcp::ntp_now(),
+-                    self.rtp_ts,
++                    rtp_timestamp(self.start.elapsed(), self.ts_offset),
+                     self.packets,
+                     self.octets,
+                 );
+@@ -242,9 +241,11 @@
+                 *slot = Some(&t.data);
+             }
+         }
+-        self.rtp_ts = rtp_timestamp(self.start.elapsed(), self.ts_offset);
++        let elapsed = self.start.elapsed();
++        let age = out.presented.map_or(Duration::ZERO, |capture| monotonic_now().saturating_sub(capture));
++        let rtp_ts = rtp_timestamp(elapsed.saturating_sub(age), self.ts_offset);
+         let (mut bytes, mut errors) = (0u64, 0u64);
+-        self.pk.packetize_each(&tiles, self.rtp_ts, |mut pkt| {
++        self.pk.packetize_each(&tiles, rtp_ts, |mut pkt| {
+             if self.tx.protect_rtp(&mut pkt).is_err() {
+                 errors += 1;
+                 return;
+@@ -384,7 +385,6 @@
+         ts_offset: rand::random(),
+         packets: 0,
+         octets: 0,
+-        rtp_ts: 0,
+         last_sr: Instant::now(),
+         stats: send_stats.clone(),
+         send_errors_logged: 0,

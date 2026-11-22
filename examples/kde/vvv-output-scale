@@ -1,0 +1,64 @@
+#!/usr/bin/python3
+"""Apply the scale encoded in the crosvm monitor's EDID to the Plasma session."""
+import json
+import os
+from pathlib import Path
+import select
+import subprocess
+import sys
+import time
+
+
+def desired_scale(connector):
+    edid = (connector / "edid").read_bytes()
+    # The crosvm EDID provides native width in the DisplayID extension and
+    # physical width (in whole mm) in the base block's detailed timing.
+    if len(edid) < 256 or edid[128] != 0x70:
+        return None
+    width = 1 + int.from_bytes(edid[140:142], "little")
+    mm = edid[66] + ((edid[68] >> 4) << 8)
+    if not mm:
+        return None
+    # Account for truncation to whole millimetres, then snap to KDE scale steps.
+    scale = width * 25.4 / (mm + 0.5) / 96
+    return max(1, min(4, round(scale * 8) / 8))
+
+
+def reconcile():
+    connectors = list(Path("/sys/class/drm").glob("card*-Virtual-*"))
+    active = [c for c in connectors if (c / "status").read_text().strip() == "connected"]
+    if len(active) != 1:  # Hotplug presents both monitors briefly.
+        return False
+    connector = active[0]
+    scale = desired_scale(connector)
+    if scale is None:
+        return False
+    name = connector.name.split("-", 1)[1]
+    outputs = json.loads(subprocess.check_output(["kscreen-doctor", "-j"], timeout=4))["outputs"]
+    output = next((o for o in outputs if o["name"] == name and o["enabled"]), None)
+    if output is None:
+        return False
+    if abs(output["scale"] - scale) < 0.01:
+        return True
+    subprocess.run(["kscreen-doctor", f"output.{name}.scale.{scale:g}"], check=True, timeout=4)
+    return False  # Confirm KWin applied the change.
+
+
+def main():
+    with subprocess.Popen(["udevadm", "monitor", "--udev", "--subsystem-match=drm"],
+                          stdout=subprocess.PIPE) as monitor:
+        while monitor.poll() is None:
+            try:
+                settled = reconcile()
+            except (OSError, subprocess.SubprocessError, ValueError, KeyError) as error:
+                print(error, file=sys.stderr, flush=True)
+                settled = False
+            ready, _, _ = select.select([monitor.stdout], [], [], None if settled else 1)
+            if ready:
+                if not os.read(monitor.stdout.fileno(), 65536):
+                    break
+                time.sleep(0.25)
+
+
+if __name__ == "__main__":
+    main()

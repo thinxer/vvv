@@ -1,0 +1,21 @@
+/.local/
+/.cache/
+/.podman/
+/target/
+**/target
+/guest/*.img
+/guest/*.elf
+/guest/*.sock
+/guest/*.log
+/guest/*.png
+/guest/*-live/
+/guest/rootfs
+/guest/arch/rootfs/
+/guest/captures/
+/guest/downloads
+/guest/initramfs
+
+# Local upstream checkouts and built driver libraries.
+/crosvm/
+/virglrenderer/
+/runtime/

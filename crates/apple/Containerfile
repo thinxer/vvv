@@ -1,0 +1,7 @@
+FROM docker.io/library/debian:sid-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential bindgen libclang-dev ca-certificates git pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+
+FROM docker.io/library/debian:sid-slim AS runtime

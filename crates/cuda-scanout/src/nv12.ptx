@@ -1,0 +1,47 @@
+// One thread converts a 2x2 RGBA block. NV12 plane pitch is in bytes.
+.version 6.0
+.target sm_52
+.address_size 64
+.visible .entry to_nv12(.param .u64 src, .param .u32 stride, .param .u64 dst,
+ .param .u32 pitch, .param .u32 width, .param .u32 height, .param .u32 rows, .param .u32 full) {
+ .reg .u32 x,y,w,h,n,sp,dp,i,j,r,g,b,a,rs,gs,bs;
+ .reg .u32 t,u,v,pX,pY,lim,yOff;
+ .reg .s32 yr,yg,yb,ur,ug,ub,vr,vg,vb;
+ .reg .u64 inBase,outBase,addr,off;
+ .reg .pred pred,isFull,padded;
+ mov.u32 x,%ctaid.x; mov.u32 t,%tid.x; mad.lo.u32 x,x,16,t; shl.b32 x,x,1;
+ mov.u32 y,%ctaid.y; mov.u32 t,%tid.y; mad.lo.u32 y,y,8,t; shl.b32 y,y,1;
+ ld.param.u32 w,[width]; ld.param.u32 h,[height];
+ setp.ge.u32 pred,x,w; @pred ret;
+ setp.ge.u32 pred,y,h; @pred ret;
+ ld.param.u64 inBase,[src]; ld.param.u64 outBase,[dst];
+ ld.param.u32 sp,[stride]; ld.param.u32 dp,[pitch]; ld.param.u32 n,[rows];
+ sub.u32 lim,n,2; setp.ge.u32 padded,y,n; ld.param.u32 t,[full]; setp.ne.u32 isFull,t,0;
+ // BT.709 fixed-point coefficients, scaled by 65536.
+ selp.s32 yr,13933,11966,isFull; selp.s32 yg,46871,40254,isFull; selp.s32 yb,4732,4064,isFull;
+ selp.s32 ur,-7509,-6596,isFull; selp.s32 ug,-25259,-22189,isFull; selp.s32 ub,32768,28784,isFull;
+ selp.s32 vr,32768,28784,isFull; selp.s32 vg,-29763,-26145,isFull; selp.s32 vb,-3005,-2639,isFull;
+ selp.u32 yOff,0,16,isFull;
+ mov.u32 rs,0; mov.u32 gs,0; mov.u32 bs,0; mov.u32 j,0;
+row:
+ mov.u32 i,0;
+pixel:
+ add.u32 pX,x,i; add.u32 pY,y,j; min.u32 t,y,lim; add.u32 t,t,j;
+ mul.wide.u32 off,t,sp; add.u64 addr,inBase,off; mul.wide.u32 off,pX,4; add.u64 addr,addr,off;
+ ld.global.v4.u8 {r,g,b,a},[addr];
+ add.u32 rs,rs,r; add.u32 gs,gs,g; add.u32 bs,bs,b;
+ mad.lo.s32 t,r,yr,32768; mad.lo.s32 t,g,yg,t; mad.lo.s32 t,b,yb,t;
+ shr.u32 t,t,16; add.u32 t,t,yOff;
+ mul.wide.u32 off,pY,dp; add.u64 addr,outBase,off; cvt.u64.u32 off,pX; add.u64 addr,addr,off; st.global.u8 [addr],t;
+ // Pad Y with the final luma row and UV with the final 2-row chroma average.
+ setp.eq.and.u32 pred,j,1,padded;
+ @pred cvt.u64.u32 off,dp; @pred sub.u64 addr,addr,off; @pred st.global.u8 [addr],t;
+ add.u32 i,i,1; setp.lt.u32 pred,i,2; @pred bra pixel;
+ add.u32 j,j,1; setp.lt.u32 pred,j,2; @pred bra row;
+ add.u32 rs,rs,2; shr.u32 r,rs,2; add.u32 gs,gs,2; shr.u32 g,gs,2; add.u32 bs,bs,2; shr.u32 b,bs,2;
+ mad.lo.s32 u,r,ur,8421376; mad.lo.s32 u,g,ug,u; mad.lo.s32 u,b,ub,u;
+ mad.lo.s32 v,r,vr,8421376; mad.lo.s32 v,g,vg,v; mad.lo.s32 v,b,vb,v;
+ shr.s32 u,u,16; shr.s32 v,v,16; min.s32 u,u,255; min.s32 v,v,255; max.s32 u,u,0; max.s32 v,v,0;
+ shr.u32 t,y,1; add.u32 t,h,t; mul.wide.u32 off,t,dp; add.u64 addr,outBase,off;
+ cvt.u64.u32 off,x; add.u64 addr,addr,off; st.global.v2.u8 [addr],{u,v}; ret;
+}

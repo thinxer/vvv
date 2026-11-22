@@ -1,0 +1,44 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -8,7 +8,7 @@
+ [features]
+ default = ["rdp", "desktop-capture"]
+ desktop-capture = ["dep:gbm", "dep:glow", "dep:khronos-egl"]
+-apple-guest = ["dep:wayland-capture"]
++apple-guest = ["dep:wayland-capture", "dep:cuda-scanout"]
+ rdp = ["dep:ironrdp-server", "dep:async-trait", "dep:rcgen", "dep:zeroize", "dep:ironrdp-pdu", "dep:ironrdp-displaycontrol", "dep:ironrdp-egfx", "dep:ironrdp-dvc", "dep:ironrdp-svc", "dep:openh264", "dep:ironrdp-core", "dep:ironrdp-graphics"]
+ 
+ [[bench]]
+@@ -55,6 +55,7 @@
+ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ 
+ [target.'cfg(target_os = "linux")'.dependencies]
++cuda-scanout = { path = "../../../../crates/cuda-scanout", optional = true }
+ wayland-capture = { path = "../../../../crates/wayland-capture", optional = true }
+ gbm = { optional = true, version = "0.18", default-features = false }
+ glow = {version = "0.18", optional = true}
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -643,6 +643,14 @@
+ checksum = "baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21"
+ dependencies = [
+  "cipher",
++]
++
++[[package]]
++name = "cuda-scanout"
++version = "0.1.0"
++dependencies = [
++ "anyhow",
++ "libloading 0.8.9",
+ ]
+ 
+ [[package]]
+@@ -3859,6 +3867,7 @@
+  "bytes",
+  "clap",
+  "console",
++ "cuda-scanout",
+  "demand",
+  "flate2",
+  "gbm",

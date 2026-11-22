@@ -1,0 +1,430 @@
+diff --git a/src/audio/sender.rs b/src/audio/sender.rs
+index 5cb166a..1e28987 100644
+--- a/src/audio/sender.rs
++++ b/src/audio/sender.rs
+@@ -59,15 +59,21 @@ impl Control {
+ 
+ impl AudioSender {
+     pub fn start(p: AudioParams) -> Result<Self> {
+-        let sock = UdpSocket::bind(SocketAddr::new(
+-            if p.peer.is_ipv4() {
+-                std::net::Ipv4Addr::UNSPECIFIED.into()
+-            } else {
+-                std::net::Ipv6Addr::UNSPECIFIED.into()
+-            },
+-            p.local_port,
+-        ))
+-        .with_context(|| format!("binding audio UDP {}", p.local_port))?;
++        let bind = if p.peer.is_ipv4() {
++            std::net::Ipv4Addr::UNSPECIFIED.into()
++        } else {
++            std::net::Ipv6Addr::UNSPECIFIED.into()
++        };
++        Self::start_source(p, bind, false)
++    }
++
++    pub fn start_silent(p: AudioParams, bind: std::net::IpAddr) -> Result<Self> {
++        Self::start_source(p, bind, true)
++    }
++
++    fn start_source(p: AudioParams, bind: std::net::IpAddr, silent: bool) -> Result<Self> {
++        let sock = UdpSocket::bind(SocketAddr::new(bind, p.local_port))
++            .with_context(|| format!("binding audio UDP {}", p.local_port))?;
+         sock.connect(p.peer)?;
+         sock.set_nonblocking(true)?;
+         let control = Arc::new(Control::default());
+@@ -75,7 +81,7 @@ impl AudioSender {
+         let thread = std::thread::Builder::new()
+             .name("hp-audio".into())
+             .spawn(move || {
+-                if let Err(e) = run(p, sock, &s) {
++                if let Err(e) = run(p, sock, &s, silent) {
+                     warn!("HP audio stopped, continuing with video only: {e:#}");
+                 }
+             })?;
+@@ -152,7 +158,7 @@ fn wait_for_receiver(
+     Ok(false)
+ }
+ 
+-fn run(p: AudioParams, sock: UdpSocket, control: &Control) -> Result<()> {
++fn run(p: AudioParams, sock: UdpSocket, control: &Control, silent: bool) -> Result<()> {
+     let stop = &control.stop;
+     while !control.activated.load(Ordering::Acquire) {
+         if stop.load(Ordering::Relaxed) {
+@@ -173,8 +179,13 @@ fn run(p: AudioParams, sock: UdpSocket, control: &Control) -> Result<()> {
+         return Ok(());
+     }
+     info!("HP audio readiness wait complete");
+-    let Some(mut cap) = MonitorCapture::open(p.device.as_deref(), stop)? else {
+-        return Ok(());
++    let mut cap = if silent {
++        None
++    } else {
++        match MonitorCapture::open(p.device.as_deref(), stop)? {
++            Some(capture) => Some(capture),
++            None => return Ok(()),
++        }
+     };
+     let mut enc = AacEldEncoder::new(&p.encoder)?;
+     let mut pk = AudioPacketizer::new(p.ssrc, p.payload_type, rand::random(), rand::random());
+@@ -183,9 +194,16 @@ fn run(p: AudioParams, sock: UdpSocket, control: &Control) -> Result<()> {
+     let mut rtcp_send_errors = 0u64;
+     let mut next_sr = Instant::now();
+     info!(peer = %p.peer, ssrc = format_args!("{:#x}", p.ssrc), "HP audio started");
++    let period = Duration::from_secs_f64(SAMPLES_PER_FRAME as f64 / super::rtp::CLOCK_RATE as f64);
++    let mut deadline = Instant::now();
+     while !stop.load(Ordering::Relaxed) {
+-        if !cap.read_frame(&mut pcm, stop)? {
+-            break;
++        if let Some(cap) = &mut cap {
++            if !cap.read_frame(&mut pcm, stop)? {
++                break;
++            }
++        } else {
++            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
++            deadline = (deadline + period).max(Instant::now());
+         }
+         // A stop request can arrive while capture blocks for the next frame.
+         if stop.load(Ordering::Relaxed) {
+diff --git a/src/capture/mod.rs b/src/capture/mod.rs
+index feb1075..b901824 100644
+--- a/src/capture/mod.rs
++++ b/src/capture/mod.rs
+@@ -83,7 +83,8 @@ pub struct DmabufBuffer {
+     pub fourcc: u32,
+     pub modifier: u64,
+     pub planes: Vec<Plane>,
+-    wl_buffer: WlBuffer,
++    wl_buffer: Option<WlBuffer>,
++    pixels: Option<Vec<u8>>,
+     mapping: std::sync::OnceLock<Mapping>,
+     gbm: Option<alloc::GbmBuffer>,
+     /// A wl_shm memfd, which needs no DMA_BUF sync.
+@@ -91,6 +92,32 @@ pub struct DmabufBuffer {
+ }
+ 
+ impl DmabufBuffer {
++    /// A tightly packed, immutable CPU scanout suitable for the software encoder.
++    pub fn from_bgrx(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self> {
++        anyhow::ensure!(
++            width > 0
++                && height > 0
++                && (width as usize)
++                    .checked_mul(height as usize)
++                    .and_then(|n| n.checked_mul(4))
++                    == Some(pixels.len()),
++            "invalid BGRX frame"
++        );
++        Ok(Self {
++            id: 0,
++            width,
++            height,
++            fourcc: u32::from_le_bytes(*b"XR24"),
++            modifier: alloc::MOD_LINEAR,
++            planes: vec![],
++            wl_buffer: None,
++            pixels: Some(pixels),
++            mapping: Default::default(),
++            gbm: None,
++            shm: true,
++        })
++    }
++
+     /// Whether this is wl_shm memory rather than a dmabuf.
+     pub fn is_shm(&self) -> bool {
+         self.shm
+@@ -98,6 +125,9 @@ impl DmabufBuffer {
+ 
+     /// Consumes BGRX pixels while mapped. GBM detiles nonlinear buffers for the callback.
+     pub fn with_read<T>(&self, read: impl FnOnce(&ReadGuard<'_>) -> T) -> Result<T> {
++        if let Some(bytes) = &self.pixels {
++            return Ok(read(&ReadGuard::borrowed(bytes, self.width as usize * 4)));
++        }
+         validate_cpu_format(self.fourcc)?;
+         if self.modifier != alloc::MOD_LINEAR {
+             return self
+@@ -124,7 +154,9 @@ impl DmabufBuffer {
+ 
+ impl Drop for DmabufBuffer {
+     fn drop(&mut self) {
+-        self.wl_buffer.destroy();
++        if let Some(buffer) = &self.wl_buffer {
++            buffer.destroy();
++        }
+     }
+ }
+ 
+@@ -586,7 +618,8 @@ impl State {
+                 fourcc: c.fourcc,
+                 modifier: alloc.modifier,
+                 planes: alloc.planes,
+-                wl_buffer,
++                wl_buffer: Some(wl_buffer),
++                pixels: None,
+                 mapping: Default::default(),
+                 shm: true,
+                 gbm: alloc.gbm,
+@@ -654,7 +687,8 @@ impl State {
+             modifier: alloc.modifier,
+             planes: alloc.planes,
+             gbm: alloc.gbm,
+-            wl_buffer,
++            wl_buffer: Some(wl_buffer),
++            pixels: None,
+             mapping: Default::default(),
+             shm: false,
+         });
+@@ -668,7 +702,12 @@ impl State {
+             let session = session.clone();
+             let buffer = self.take_buffer(qh)?;
+             let f = session.create_frame(qh, ());
+-            f.attach_buffer(&buffer.wl_buffer);
++            f.attach_buffer(
++                buffer
++                    .wl_buffer
++                    .as_ref()
++                    .expect("capture pool Wayland buffer"),
++            );
+             f.damage_buffer(0, 0, buffer.width as i32, buffer.height as i32);
+             f.capture();
+             (CaptureFrame::Ext(f), Some(buffer))
+@@ -940,7 +979,12 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
+                 });
+                 match state.take_buffer(qh) {
+                     Ok(buffer) => {
+-                        frame.copy_with_damage(&buffer.wl_buffer);
++                        frame.copy_with_damage(
++                            buffer
++                                .wl_buffer
++                                .as_ref()
++                                .expect("capture pool Wayland buffer"),
++                        );
+                         if let Some(f) = state.inflight_mut() {
+                             f.buffer = Some(buffer);
+                         }
+diff --git a/src/server_linux.rs b/src/server_linux.rs
+index 48d27cb..9cfc9c9 100644
+--- a/src/server_linux.rs
++++ b/src/server_linux.rs
+@@ -158,7 +158,15 @@ impl Drop for HiddenCursor {
+ }
+ 
+ /// High Performance media: capture -> VAAPI HEVC tiles -> RTP/SRTP over UDP.
++pub trait ExternalScreen: Send + Sync {
++    fn size(&self) -> (u16, u16);
++    fn next_frame(&self, after: u64, timeout: std::time::Duration)
++    -> Option<crate::capture::Frame>;
++}
++
+ pub struct LinuxHp {
++    media_bind: std::net::Ipv4Addr,
++    external: Option<Arc<dyn ExternalScreen>>,
+     output: Option<String>,
+     port: u16,
+     encoder: EncoderConfig,
+@@ -213,6 +221,8 @@ impl LinuxHp {
+             port,
+             encoder,
+             fixed_bitrate,
++            external: None,
++            media_bind: std::net::Ipv4Addr::UNSPECIFIED,
+             audio,
+             swap_keys,
+             media: Mutex::new(None),
+@@ -221,6 +231,16 @@ impl LinuxHp {
+ }
+ 
+ impl LinuxHp {
++    pub fn with_external_screen(
++        mut self,
++        screen: Arc<dyn ExternalScreen>,
++        bind: std::net::Ipv4Addr,
++    ) -> Self {
++        self.external = Some(screen);
++        self.media_bind = bind;
++        self
++    }
++
+     fn output_info(&self) -> Result<crate::display::OutputInfo> {
+         use crate::display::DisplayManager;
+         let mut hypr = crate::display::hyprland::Hyprland::from_env()?;
+@@ -292,10 +312,18 @@ impl HpBackend for LinuxHp {
+         peer: SocketAddr,
+         config: MediaStreamConfig,
+     ) -> Result<Option<MediaAnswer>> {
+-        let output = self.output_info()?;
+-        let stream_size = (output.width, output.height);
++        let (stream_size, scale) = match &self.external {
++            Some(screen) => {
++                let (w, h) = screen.size();
++                ((u32::from(w), u32::from(h)), 1.0)
++            }
++            None => {
++                let o = self.output_info()?;
++                ((o.width, o.height), o.scale)
++            }
++        };
+         let px = |v: u32| v.min(u16::MAX as u32) as u16;
+-        let pixels = (px(output.width), px(output.height));
++        let pixels = (px(stream_size.0), px(stream_size.1));
+         let video = Offer::parse(&config.video1.offer).context("parsing video offer")?;
+         let audio = Offer::parse(&config.audio.offer).context("parsing audio offer")?;
+         let v = negotiation::answer(
+@@ -336,6 +364,8 @@ impl HpBackend for LinuxHp {
+             )
+         };
+         let params = media::MediaParams {
++            bind: self.media_bind,
++            external: self.external.clone(),
+             output: self.output.clone(),
+             peer: canonical_ip(peer.ip()),
+             port: self.port,
+@@ -382,7 +412,12 @@ impl HpBackend for LinuxHp {
+                 encoder: crate::audio::fdk::EncoderConfig::default(),
+                 device: None,
+             };
+-            match crate::audio::sender::AudioSender::start(params) {
++            let sender = if self.external.is_some() {
++                crate::audio::sender::AudioSender::start_silent(params, self.media_bind.into())
++            } else {
++                crate::audio::sender::AudioSender::start(params)
++            };
++            match sender {
+                 Ok(sender) => {
+                     info!(ssrc = format_args!("{:#x}", a.ssrc), "HP audio prepared");
+                     Some(sender)
+@@ -429,10 +464,10 @@ impl HpBackend for LinuxHp {
+             display: Some(crate::rfb::AppliedDisplay {
+                 pixels,
+                 points: (
+-                    (pixels.0 as f64 / output.scale).round() as u16,
+-                    (pixels.1 as f64 / output.scale).round() as u16,
++                    (pixels.0 as f64 / scale).round() as u16,
++                    (pixels.1 as f64 / scale).round() as u16,
+                 ),
+-                scale: output.scale,
++                scale,
+             }),
+             flags: 1,
+             audio: a.bytes,
+diff --git a/src/server_linux/media.rs b/src/server_linux/media.rs
+index 8306493..31a3e8e 100644
+--- a/src/server_linux/media.rs
++++ b/src/server_linux/media.rs
+@@ -29,6 +29,8 @@ const FIR_DEDUPE: Duration = Duration::from_millis(500);
+ const SEND_BUFFER: usize = 8 << 20;
+ 
+ pub(super) struct MediaParams {
++    pub(super) bind: Ipv4Addr,
++    pub(super) external: Option<Arc<dyn super::ExternalScreen>>,
+     pub(super) output: Option<String>,
+     pub(super) peer: IpAddr,
+     pub(super) port: u16,
+@@ -289,7 +291,7 @@ pub(super) enum MediaEnd {
+ }
+ 
+ pub(super) fn run_media(p: MediaParams, stop: &AtomicBool) -> Result<MediaEnd> {
+-    let sock = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), p.port))
++    let sock = UdpSocket::bind(SocketAddr::new(IpAddr::V4(p.bind), p.port))
+         .with_context(|| format!("binding UDP {}", p.port))?;
+     sock.connect(SocketAddr::new(p.peer, p.port))?;
+     sock.set_nonblocking(true)?;
+@@ -308,7 +310,7 @@ pub(super) fn run_media(p: MediaParams, stop: &AtomicBool) -> Result<MediaEnd> {
+     );
+ 
+     let mut backend = EncoderBackend::auto(std::path::Path::new(RENDER_NODE), &p.encoder);
+-    let mut cap = open_capturer(p.output.as_deref(), backend)?;
++    let mut cap = open_capturer(&p, backend)?;
+     let Some(mut first) = first_frame(&mut cap, stop)? else {
+         return Ok(MediaEnd::Stopped);
+     };
+@@ -324,7 +326,7 @@ pub(super) fn run_media(p: MediaParams, stop: &AtomicBool) -> Result<MediaEnd> {
+         );
+         if picked.capture_memory() != backend.capture_memory() {
+             drop(first);
+-            cap = open_capturer(p.output.as_deref(), picked)?;
++            cap = open_capturer(&p, picked)?;
+             first = match first_frame(&mut cap, stop)? {
+                 Some(f) => f,
+                 None => return Ok(MediaEnd::Stopped),
+@@ -409,23 +411,58 @@ pub(super) fn run_media(p: MediaParams, stop: &AtomicBool) -> Result<MediaEnd> {
+     r
+ }
+ 
+-fn open_capturer(output: Option<&str>, backend: EncoderBackend) -> Result<Capturer> {
++enum Source {
++    Wayland(Capturer),
++    External(Arc<dyn super::ExternalScreen>, u64),
++}
++
++impl Source {
++    fn render_node(&self) -> &std::path::Path {
++        match self {
++            Self::Wayland(c) => c.render_node(),
++            Self::External(..) => std::path::Path::new(RENDER_NODE),
++        }
++    }
++
++    fn next_frame(&mut self, timeout: Duration) -> Result<Option<crate::capture::Frame>> {
++        match self {
++            Self::Wayland(c) => c.next_frame(Some(timeout)),
++            Self::External(s, last) => {
++                let frame = s.next_frame(*last, timeout);
++                if let Some(f) = &frame {
++                    *last = f.seq;
++                }
++                Ok(frame)
++            }
++        }
++    }
++}
++
++fn open_capturer(p: &MediaParams, backend: EncoderBackend) -> Result<Source> {
++    if let Some(screen) = &p.external {
++        ensure!(
++            backend == EncoderBackend::X265,
++            "external CPU frames require x265"
++        );
++        return Ok(Source::External(screen.clone(), 0));
++    }
+     Capturer::with_options(
+-        output,
++        p.output.as_deref(),
+         crate::capture::CaptureOptions {
+             memory: backend.capture_memory(),
+             ..Default::default()
+         },
+     )
++    .map(Source::Wayland)
+ }
+ 
+ /// `None` if `stop` was set first.
+-fn first_frame(cap: &mut Capturer, stop: &AtomicBool) -> Result<Option<crate::capture::Frame>> {
++fn first_frame(cap: &mut Source, stop: &AtomicBool) -> Result<Option<crate::capture::Frame>> {
+     loop {
+         if stop.load(Ordering::Relaxed) {
+             return Ok(None);
+         }
+-        if let Some(f) = cap.next_frame(Some(Duration::from_millis(500)))? {
++        if let Some(f) = cap.next_frame(Duration::from_millis(500))? {
+             return Ok(Some(f));
+         }
+     }
+@@ -441,7 +478,7 @@ fn repick_backend(forced: bool, usable_on_capture_node: bool) -> bool {
+ fn media_loop(
+     stop: &AtomicBool,
+     sock: &UdpSocket,
+-    cap: &mut Capturer,
++    cap: &mut Source,
+     enc: &mut Encoder,
+     rc: &mut RateController,
+     rx: &mut RtcpFeedback,
+@@ -540,7 +577,7 @@ fn media_loop(
+ 
+         // Poll quickly while a frame waits for the encoder.
+         let wait = if held.is_some() { 2 } else { 20 };
+-        if let Some(f) = cap.next_frame(Some(Duration::from_millis(wait)))? {
++        if let Some(f) = cap.next_frame(Duration::from_millis(wait))? {
+             if let Some(p) = f.presented {
+                 let ready = monotonic_now().saturating_sub(f.ready_at.elapsed());
+                 stats

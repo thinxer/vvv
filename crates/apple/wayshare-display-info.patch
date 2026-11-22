@@ -1,0 +1,65 @@
+diff --git a/src/rfb/session.rs b/src/rfb/session.rs
+index 48dad61..7b8eae3 100644
+--- a/src/rfb/session.rs
++++ b/src/rfb/session.rs
+@@ -85,6 +85,7 @@ pub async fn run(mut stream: TcpStream, cfg: Arc<Config>, id: SessionId) -> Resu
+         display_scale: 1.0,
+         keycode_needs_bit1: false,
+         display_applied: None,
++        pending_display_info: None,
+         dynamic_resolution: false,
+         stats: RfbStats::new(),
+         source,
+@@ -223,6 +224,7 @@ struct Session {
+     keycode_needs_bit1: bool,
+     /// Set after a msg 29 resize; sent as DisplayInfo2/DisplayInfo once the new size is live.
+     display_applied: Option<AppliedDisplay>,
++    pending_display_info: Option<AppliedDisplay>,
+     /// The viewer's last msg 29 asked for dynamic resolution.
+     dynamic_resolution: bool,
+     stats: RfbStats,
+@@ -278,6 +280,9 @@ impl Session {
+                     .find(|e| *e == ENC_ZLIB || *e == ENC_RAW)
+                     .unwrap_or(ENC_RAW);
+                 self.encodings = list;
++                if let Some(display) = self.pending_display_info.take() {
++                    self.send_display_info(display).await?;
++                }
+                 debug!(encoding = self.encoding, "selected encoding");
+                 self.offer_media_stream().await?;
+             }
+@@ -669,8 +674,11 @@ impl Session {
+             let payload = apple::encode_display_info(d.points.0, d.points.1, 0, &[entry]);
+             pseudo::single_rect(0, 0, w, h, pseudo::ENC_DISPLAY_INFO, &payload)
+         } else {
++            // Screen Sharing can send msg 29 before its first SetEncodings.
++            self.pending_display_info = Some(d);
+             return Ok(());
+         };
++        self.pending_display_info = None;
+         self.out.send(&msg).await?;
+         info!(
+             pixels = ?d.pixels,
+@@ -1600,6 +1608,22 @@ mod tests {
+         }
+     }
+ 
++    #[tokio::test(flavor = "multi_thread")]
++    async fn msg29_before_encodings_defers_display_info() {
++        let (mut client, server) = start(test_config()).await.unwrap();
++        client.write_all(include_bytes!("../../tests/fixtures/msg29-0.bin")).await.unwrap();
++        let mut encodings = vec![2, 0, 0, 1];
++        encodings.extend_from_slice(&pseudo::ENC_DISPLAY_INFO.to_be_bytes());
++        client.write_all(&encodings).await.unwrap();
++        let payload = apple::encode_display_info(64, 48, 0, &[apple::DisplayInfoEntry {
++            display_id: 1, pixel_width: 64, pixel_height: 48,
++        }]);
++        let expected = pseudo::single_rect(0, 0, 64, 48, pseudo::ENC_DISPLAY_INFO, &payload);
++        read_until(&mut client, "deferred display info", |got| has_seq(got, &expected)).await;
++        drop(client);
++        server.await.unwrap().unwrap();
++    }
++
+     struct ResizingDisplay;
+     impl DisplayControl for ResizingDisplay {
+         fn configure(

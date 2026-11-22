@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Virtual display scaling
+Exec=/usr/local/bin/vvv-output-scale
+OnlyShowIn=KDE;
+NoDisplay=true

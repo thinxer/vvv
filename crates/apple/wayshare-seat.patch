@@ -1,0 +1,137 @@
+--- a/src/rfb/mod.rs
++++ b/src/rfb/mod.rs
+@@ -27,7 +27,13 @@
+     pub enclosure_color: String,
+ }
+ 
++type ViewerPermit = std::pin::Pin<
++    Box<dyn std::future::Future<Output = anyhow::Result<tokio::sync::OwnedMutexGuard<()>>> + Send>,
++>;
++pub type ActivateViewer = Arc<dyn Fn(std::net::IpAddr, tokio::sync::watch::Sender<bool>) -> ViewerPermit + Send + Sync>;
++
+ pub struct Config {
++    pub activate_viewer: Option<ActivateViewer>,
+     pub name: String,
+     pub width: u16,
+     pub height: u16,
+@@ -86,6 +92,7 @@
+ impl Config {
+     pub fn new(name: impl Into<String>, width: u16, height: u16, auth: AuthConfig) -> Self {
+         Self {
++            activate_viewer: None,
+             name: name.into(),
+             width,
+             height,
+@@ -115,7 +122,7 @@
+         if self.clipboard_backend.is_some() {
+             cmds.extend(crate::clipboard::proto::CLIENT_MSGS);
+         }
+-        if self.hp.as_ref().is_some_and(|hp| hp.available(peer)) {
++        if self.hp.as_ref().is_some_and(|hp| self.activate_viewer.is_some() || hp.available(peer)) {
+             cmds.push(handshake::MSG_MEDIA_STREAM_CONFIG);
+             cmds.push(handshake::MSG_SET_DISPLAY_CONFIG);
+         }
+--- a/src/rfb/handshake.rs
++++ b/src/rfb/handshake.rs
+@@ -64,6 +64,22 @@
+ where
+     S: AsyncRead + AsyncWrite + Unpin,
+ {
++    run_with_admission(stream, auth, width, height, pixel_format, name, server_cmds, std::future::ready(Ok(()))).await
++}
++
++pub(super) async fn run_with_admission<S>(
++    stream: &mut S,
++    auth: &AuthConfig,
++    width: u16,
++    height: u16,
++    pixel_format: &PixelFormat,
++    name: &str,
++    server_cmds: &[u8],
++    admit: impl std::future::Future<Output = Result<()>>,
++) -> Result<Option<Session>>
++where
++    S: AsyncRead + AsyncWrite + Unpin,
++{
+     stream.write_all(SERVER_VERSION).await?;
+     let mut version = [0u8; 12];
+     stream
+@@ -108,6 +124,11 @@
+         }
+     };
+     let (username, session_key) = result?;
++    if let Err(error) = admit.await {
++        fail(stream, &error.to_string()).await?;
++        info!(%error, "viewer admission declined");
++        return Ok(None);
++    }
+     stream.write_u32(0).await?;
+     info!(user = %username, method = selected, "authenticated");
+ 
+--- a/src/rfb/session.rs
++++ b/src/rfb/session.rs
+@@ -49,27 +49,33 @@
+     let (w, h) = source.size();
+     let cmds = cfg.server_cmds(canonical_ip(peer.ip()));
+ 
+-    let handshake = handshake::run(
+-        &mut stream,
+-        &cfg.auth,
+-        w,
+-        h,
+-        &PixelFormat::NATIVE,
+-        &cfg.name,
+-        &cmds,
++    let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
++    // Declared before Session so teardown releases input and stops media before the permit.
++    let mut permit = None;
++    let admission = async {
++        if let Some(activate) = &cfg.activate_viewer {
++            permit = Some(activate(canonical_ip(peer.ip()), cancel).await?);
++        }
++        Ok(())
++    };
++    let handshake = handshake::run_with_admission(
++        &mut stream, &cfg.auth, w, h, &PixelFormat::NATIVE, &cfg.name, &cmds, admission,
+     );
+-    let Some(hs) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+-        .await
+-        .map_err(|_| anyhow!("handshake timed out after {HANDSHAKE_TIMEOUT:?}"))??
+-    else {
+-        return Ok(());
++    let hs = tokio::select! {
++        hs = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake) =>
++            hs.map_err(|_| anyhow!("handshake timed out after {HANDSHAKE_TIMEOUT:?}"))??,
++        _ = cancelled.changed(), if cfg.activate_viewer.is_some() => return Ok(()),
+     };
++    let Some(hs) = hs else { return Ok(()); };
+     info!(user = %hs.username, flags = format_args!("{:#04x}", hs.client_flags), ?cmds, "session started");
+ 
+     let (rd, wr) = stream.into_split();
+     let (tx, mut rx) = mpsc::channel(256);
+     let keys: StreamKeys = Arc::default();
+-    tokio::spawn(reader(rd, tx, keys.clone()));
++    // A displaced peer can keep its read half open after the server sends FIN.
++    // Own the reader task so session teardown also releases that socket.
++    let mut reader_task = tokio::task::JoinSet::new();
++    reader_task.spawn(reader(rd, tx, keys.clone()));
+ 
+     let mut cursor: Box<dyn CursorSource> = blocking(|| (cfg.cursor_source)());
+     let input: Box<dyn InputSink> = match &cfg.input {
+@@ -123,6 +129,7 @@
+     let result = async {
+         loop {
+             tokio::select! {
++                _ = cancelled.changed(), if permit.is_some() => return Ok(()),
+                 msg = rx.recv() => match msg {
+                     Some(Ok(m)) => s.handle(m).await?,
+                     Some(Err(e)) if is_eof(&e) => {
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,3 +1,6 @@
++[lints.rust]
++unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("combined"))'] }
++
+ [package]
+ name = "wayshare"
+ version = "0.4.0"

@@ -1,0 +1,7 @@
+[Daemon]
+Autolock=false
+LockOnResume=false
+LockOnActivities=false
+LockOnSuspend=false
+LockOnLid=false
+LockOnScreensaver=false

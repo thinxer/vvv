@@ -1,0 +1,159 @@
+--- a/src/server_linux/media.rs
++++ b/src/server_linux/media.rs
+@@ -16,6 +16,10 @@
+ use crate::hp::rtcp::{self, RtcpEvent};
+ use crate::hp::srtp::{self, SrtpContext};
+ use crate::rfb::media::KEY_LEN;
++
++mod ack_timing;
++use ack_timing::SentTiles;
++use std::time::SystemTime;
+ 
+ type Encoder = Box<dyn VideoEncoder<Frame = crate::capture::Frame> + Send>;
+ 
+@@ -52,6 +56,8 @@
+     frames: u64,
+     firs: u64,
+     acks: u64,
++    ack_ms: Vec<f64>,
++    unmatched: u64,
+     other_rtcp: u64,
+     /// Latest receiver feedback (RCTL): bandwidth estimate and one-way relative delay.
+     feedback: Option<RateFeedback>,
+@@ -127,13 +133,14 @@
+         events
+     }
+ 
+-    fn drain(&mut self, sock: &UdpSocket) -> Vec<RtcpEvent> {
++    fn drain(&mut self, sock: &UdpSocket) -> Vec<(RtcpEvent, Option<SystemTime>)> {
+         let mut events = Vec::new();
+         let mut buf = [0u8; 2048];
+         // A continuously readable socket must leave time for capture, timeout and stop checks.
+         for _ in 0..MAX_RTCP_BATCH {
+-            match sock.recv(&mut buf) {
+-                Ok(n) => events.extend(self.accept(buf[..n].to_vec(), Instant::now())),
++            match ack_timing::receive(sock, &mut buf) {
++                Ok((n, arrival)) => events.extend(self.accept(buf[..n].to_vec(), Instant::now())
++                    .into_iter().map(|ev| (ev, arrival))),
+                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                 Err(e) => {
+@@ -200,6 +207,7 @@
+     last_sr: Instant,
+     stats: Arc<Mutex<SendStats>>,
+     send_errors_logged: u32,
++    sent: Arc<Mutex<SentTiles>>,
+ }
+ 
+ impl Sender {
+@@ -235,6 +243,7 @@
+ 
+     fn send_frame(&mut self, out: crate::encode::EncodedFrame) {
+         let t0 = Instant::now();
++        let mut don = self.pk.next_don();
+         let mut tiles: Vec<Option<&[u8]>> = vec![None; self.tiles];
+         for t in &out.tiles {
+             if let Some(slot) = tiles.get_mut(t.index as usize) {
+@@ -253,7 +262,18 @@
+             self.packets = self.packets.wrapping_add(1);
+             self.octets = self.octets.wrapping_add(pkt.len() as u32);
+             bytes += pkt.len() as u64;
+-            if let Err(e) = self.sock.send(&pkt) {
++            // The marker is the last packet of this tile. Record only successful sends.
++            let marker = pkt[1] & 0x80 != 0;
++            let mut ledger = marker.then(|| self.sent.lock().unwrap());
++            let sent_at = ledger.as_ref().map(|_| SystemTime::now());
++            let result = self.sock.send(&pkt);
++            if let Some(tracker) = ledger.as_mut() {
++                if result.is_ok() {
++                    tracker.sent(don, sent_at.unwrap());
++                }
++                don = don.wrapping_add(1);
++            }
++            if let Err(e) = result {
+                 errors += 1;
+                 if errors == 1 && self.send_errors_logged < 10 {
+                     self.send_errors_logged += 1;
+@@ -369,7 +389,10 @@
+     let send_stats = Arc::new(Mutex::new(SendStats::default()));
+     let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+     enc.set_output(frame_tx.clone());
++    ack_timing::enable(&sock)?;
++    let sent = Arc::new(Mutex::new(SentTiles::new()));
+     let sender = Sender {
++        sent: sent.clone(),
+         sock: sock.try_clone()?,
+         pk: Packetizer::new(PacketizerConfig::new(
+             p.ssrc,
+@@ -403,6 +426,7 @@
+         first,
+         start,
+         &send_stats,
++        &sent,
+     );
+     // Dropping the encoder and the last sender closes the frame channel and ends the send thread.
+     drop(frame_tx);
+@@ -485,6 +509,7 @@
+     first: crate::capture::Frame,
+     start: Instant,
+     send_stats: &Mutex<SendStats>,
++    sent: &Mutex<SentTiles>,
+ ) -> Result<MediaEnd> {
+     let mut stats = Stats::default();
+     let mut last_log = Instant::now();
+@@ -532,7 +557,7 @@
+             anyhow::bail!("encode failed: {e}");
+         }
+ 
+-        drain_rtcp(sock, rx, enc, rc, start, &mut stats);
++        drain_rtcp(sock, rx, enc, rc, start, &mut stats, sent);
+         rx.check_timeout(start, Instant::now())?;
+ 
+         if last_log.elapsed() >= Duration::from_secs(5) {
+@@ -550,6 +575,10 @@
+                 recv_errors = rx.recv_errors,
+                 last_recv_error = ?rx.last_recv_error,
+                 don_acks = stats.acks,
++                ack_samples = stats.ack_ms.len(),
++                ack_unmatched = stats.unmatched,
++                send_to_ack_p50_ms = ?pct(&mut stats.ack_ms, 0.5),
++                send_to_ack_p95_ms = ?pct(&mut stats.ack_ms, 0.95),
+                 firs = stats.firs,
+                 target_mbps = format_args!("{:.1}", rc.target_bps() as f64 / 1e6),
+                 bwe_mbps = ?stats.feedback.as_ref().map(|f| f.bwe_bps as f64 / 1e6),
+@@ -570,6 +599,8 @@
+                 send_p50_ms = ?pct(&mut st.send_ms, 0.5),
+                 "HP stats"
+             );
++            stats.ack_ms.clear();
++            stats.unmatched = 0;
+             stats.submit_ms.clear();
+             stats.present_to_ready_ms.clear();
+             last_log = Instant::now();
+@@ -612,8 +643,9 @@
+     rc: &mut RateController,
+     start: Instant,
+     stats: &mut Stats,
++    sent: &Mutex<SentTiles>,
+ ) {
+-    for ev in rx.drain(sock) {
++    for (ev, arrival) in rx.drain(sock) {
+         if let Some(bps) = rc.on_event(&ev, start.elapsed()) {
+             debug!(bps, "rate control: new target");
+             enc.set_bitrate(bps as u64);
+@@ -627,7 +659,14 @@
+                     stats.last_refresh = Some(Instant::now());
+                 }
+             }
+-            RtcpEvent::DonAck { .. } => stats.acks += 1,
++            RtcpEvent::DonAck { don, .. } => {
++                stats.acks += 1;
++                if let Some(ms) = arrival.and_then(|t| sent.lock().unwrap().ack(don as u16, t)) {
++                    stats.ack_ms.push(ms);
++                } else {
++                    stats.unmatched += 1;
++                }
++            }
+             RtcpEvent::RateControl { ref data, .. } => {
+                 if let Some(fb) = RateFeedback::parse(data) {
+                     stats.feedback = Some(fb);

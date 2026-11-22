@@ -1,0 +1,20 @@
+#!/bin/busybox sh
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox modprobe virtio_pci
+/bin/busybox modprobe virtio_blk
+/bin/busybox modprobe crc32c
+/bin/busybox modprobe ext4
+/bin/busybox modprobe virtio_gpu
+/bin/busybox modprobe virtio_input
+/bin/busybox modprobe evdev
+/bin/busybox mkdir -p /newroot
+/bin/busybox mount -t ext4 -o rw /dev/vda /newroot || exec /bin/busybox sh
+if [ -f /vvv-output-scale ]; then
+    /bin/busybox mkdir -p /newroot/usr/local/bin /newroot/etc/xdg/autostart
+    /bin/busybox cp /vvv-output-scale /newroot/usr/local/bin/vvv-output-scale
+    /bin/busybox chmod 755 /newroot/usr/local/bin/vvv-output-scale
+    /bin/busybox cp /vvv-output-scale.desktop /newroot/etc/xdg/autostart/vvv-output-scale.desktop
+fi
+exec /bin/busybox switch_root /newroot /sbin/init

@@ -1,0 +1,170 @@
+--- a/src/hp/rtcp.rs
++++ b/src/hp/rtcp.rs
+@@ -11,6 +11,15 @@
+ pub const PT_BYE: u8 = 203;
+ pub const PT_APP: u8 = 204;
+ pub const PT_PSFB: u8 = 206;
++/// Append the final BYE to a compound SR/SDES report before SRTCP protection.
++pub fn append_bye(report: &mut Vec<u8>, first: u32, count: u8) {
++    assert!((1..=31).contains(&count));
++    report.extend([0x80 | count, PT_BYE, 0, count]);
++    for tile in 0..count {
++        report.extend(first.wrapping_add(u32::from(tile)).to_be_bytes());
++    }
++}
++
+ const PSFB_PLI: u8 = 1;
+ const PSFB_FIR: u8 = 4;
+ pub const APP_DON_ACK: [u8; 4] = [0, 0, 0, 5];
+--- a/src/rfb/media.rs
++++ b/src/rfb/media.rs
+@@ -85,6 +85,8 @@
+     }
+     /// Stops media started by `session`, if any. Called on every session exit.
+     fn stop(&self, _session: super::SessionId) {}
++    /// Mark an active stream for a final RTCP BYE on viewer takeover.
++    fn replaced(&self, _session: super::SessionId) {}
+     /// Client message 29, whole message. Advertising HP also advertises this message.
+     fn set_display_configuration(&self, _msg: &[u8]) -> Result<()> {
+         Ok(())
+--- a/src/rfb/session.rs
++++ b/src/rfb/session.rs
+@@ -129,7 +129,10 @@
+     let result = async {
+         loop {
+             tokio::select! {
+-                _ = cancelled.changed(), if permit.is_some() => return Ok(()),
++                _ = cancelled.changed(), if permit.is_some() => {
++                    if let Some(hp) = &s.cfg.hp { hp.replaced(s.id); }
++                    return Ok(());
++                },
+                 msg = rx.recv() => match msg {
+                     Some(Ok(m)) => s.handle(m).await?,
+                     Some(Err(e)) if is_eof(&e) => {
+--- a/src/server_linux.rs
++++ b/src/server_linux.rs
+@@ -184,6 +184,7 @@
+ }
+ 
+ struct Media {
++    goodbye: Arc<AtomicBool>,
+     session: SessionId,
+     audio: Option<crate::audio::sender::AudioSender>,
+     peer: IpAddr,
+@@ -291,6 +292,14 @@
+             .as_ref()
+             .filter(|m| m.session == session && !m.running())?;
+         m.resized_to.lock().unwrap().take()
++    }
++
++    fn replaced(&self, session: SessionId) {
++        let slot = self.media.lock().unwrap();
++        if let Some(media) = slot.as_ref().filter(|m| m.session == session) {
++            media.goodbye.store(true, Ordering::Release);
++            if let Some(audio) = &media.audio { audio.request_bye(); }
++        }
+     }
+ 
+     fn stop(&self, session: SessionId) {
+@@ -370,7 +379,9 @@
+                 config.video1.key_viewer_to_server,
+             )
+         };
++        let goodbye = Arc::new(AtomicBool::new(false));
+         let params = media::MediaParams {
++            goodbye: goodbye.clone(),
+             bind: self.media_bind,
+             external: self.external.clone(),
+             #[cfg(feature = "desktop-capture")]
+@@ -460,6 +471,7 @@
+                 Err(e) => warn!("HP media stopped: {e:#}"),
+             })?;
+         *slot = Some(Media {
++            goodbye,
+             session,
+             audio,
+             peer: peer_ip,
+--- a/src/server_linux/media.rs
++++ b/src/server_linux/media.rs
+@@ -35,6 +35,7 @@
+ const SEND_BUFFER: usize = 8 << 20;
+ 
+ pub(super) struct MediaParams {
++    pub(super) goodbye: Arc<AtomicBool>,
+     pub(super) bind: Ipv4Addr,
+     pub(super) external: Option<Arc<dyn super::ExternalScreen>>,
+     #[cfg(feature = "desktop-capture")]
+@@ -201,6 +202,7 @@
+ }
+ 
+ struct Sender {
++    goodbye: Arc<AtomicBool>,
+     sock: UdpSocket,
+     pk: Packetizer,
+     tx: SrtpContext,
+@@ -229,7 +231,7 @@
+                     return;
+                 }
+                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
++                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+             }
+             if self.last_sr.elapsed() >= Duration::from_secs(1) {
+                 let ntp = rtcp::ntp_now();
+@@ -248,6 +250,15 @@
+                     }
+                 }
+                 self.last_sr = Instant::now();
++            }
++        }
++        if self.goodbye.load(Ordering::Acquire) {
++            let mut report = rtcp::sender_report(self.ssrc, self.remote_ssrc, rtcp::ntp_now(),
++                rtp_timestamp(self.start.elapsed(), self.ts_offset), self.packets, self.octets);
++            rtcp::append_bye(&mut report, self.ssrc, self.tiles as u8);
++            match self.tx.protect_rtcp(&mut report).and_then(|_| Ok(self.sock.send(&report)?)) {
++                Ok(_) => info!(tiles=self.tiles, "sent video SRTCP BYE on takeover"),
++                Err(e) => warn!("video SRTCP BYE: {e:#}"),
+             }
+         }
+     }
+@@ -403,6 +414,7 @@
+     ack_timing::enable(&sock)?;
+     let sent = Arc::new(Mutex::new(SentTiles::new()));
+     let sender = Sender {
++        goodbye: p.goodbye.clone(),
+         sent: sent.clone(),
+         sock: sock.try_clone()?,
+         pk: Packetizer::new(PacketizerConfig::new(
+--- a/src/audio/sender.rs
++++ b/src/audio/sender.rs
+@@ -38,6 +38,7 @@
+ 
+ #[derive(Default)]
+ struct Control {
++    goodbye: AtomicBool,
+     stop: AtomicBool,
+     activated: AtomicBool,
+     send_lock: Mutex<()>,
+@@ -91,6 +92,8 @@
+         })
+     }
+ 
++    pub fn request_bye(&self) { self.control.goodbye.store(true, Ordering::Release); }
++
+     pub fn running(&self) -> bool {
+         self.thread.as_ref().is_some_and(|t| !t.is_finished())
+     }
+@@ -278,6 +281,13 @@
+                     .count() as u64;
+             }
+         }
++    }
++    if control.goodbye.load(Ordering::Acquire) {
++        let mut report = rtcp::sender_report(p.ssrc, p.remote_ssrc, rtcp::ntp_now(), pk.timestamp(), packets, octets);
++        rtcp::append_bye(&mut report, p.ssrc, 1);
++        tx.protect_rtcp(&mut report)?;
++        sock.send(&report)?;
++        info!("sent audio SRTCP BYE on takeover");
+     }
+     info!(
+         packets,

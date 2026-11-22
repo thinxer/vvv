@@ -1,0 +1,30 @@
+diff --git a/devices/src/virtio/gpu/virtio_gpu.rs b/devices/src/virtio/gpu/virtio_gpu.rs
+index ed918c4..417d612 100644
+--- a/devices/src/virtio/gpu/virtio_gpu.rs
++++ b/devices/src/virtio/gpu/virtio_gpu.rs
+@@ -411,6 +411,25 @@ impl VirtioGpuScanout {
+             _ => return Ok(OkNoData),
+         };
+ 
++        // Optional local CUDA presenter. Only primary scanouts may use this transport.
++        #[cfg(target_os = "linux")]
++        if let Some(id) = self.scanout_id {
++            type Present = unsafe extern "C" fn(u32, u32, u32, u32) -> i32;
++            static PRESENT: std::sync::OnceLock<Option<Present>> = std::sync::OnceLock::new();
++            let present = PRESENT.get_or_init(|| {
++                // SAFETY: the opt-in presenter exports this C ABI and stays loaded.
++                let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"vvv_cuda_present_v1".as_ptr()) };
++                (!symbol.is_null()).then(|| unsafe { std::mem::transmute::<*mut libc::c_void, Present>(symbol) })
++            });
++            if let Some(present) = present {
++                // SAFETY: scalar arguments describe the current primary resource.
++                if unsafe { present(id, resource.resource_id, self.width, self.height) } == 1 {
++                    display.borrow_mut().commit(surface_id)?;
++                    return Ok(OkNoData);
++                }
++            }
++        }
++
+         if let Some(import_id) =
+             VirtioGpuScanout::import_resource_to_display(display, surface_id, resource, rutabaga)
+         {

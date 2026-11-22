@@ -1,0 +1,95 @@
+--- a/src/server_linux/media.rs
++++ b/src/server_linux/media.rs
+@@ -57,6 +57,10 @@
+     firs: u64,
+     acks: u64,
+     ack_ms: Vec<f64>,
++    report_rtt_ms: Vec<f64>,
++    last_ack_arrival: Option<SystemTime>,
++    ack_bursts: usize,
++    burst_gaps_ms: Vec<f64>,
+     unmatched: u64,
+     other_rtcp: u64,
+     /// Latest receiver feedback (RCTL): bandwidth estimate and one-way relative delay.
+@@ -225,16 +229,20 @@
+                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+             }
+             if self.last_sr.elapsed() >= Duration::from_secs(1) {
++                let ntp = rtcp::ntp_now();
+                 let mut sr = rtcp::sender_report(
+                     self.ssrc,
+                     self.remote_ssrc,
+-                    rtcp::ntp_now(),
++                    ntp,
+                     rtp_timestamp(self.start.elapsed(), self.ts_offset),
+                     self.packets,
+                     self.octets,
+                 );
+                 if self.tx.protect_rtcp(&mut sr).is_ok() {
+-                    let _ = self.sock.send(&sr);
++                    let at = SystemTime::now();
++                    if self.sock.send(&sr).is_ok() {
++                        self.sent.lock().unwrap().remember_report(self.ssrc, (ntp >> 16) as u32, at);
++                    }
+                 }
+                 self.last_sr = Instant::now();
+             }
+@@ -577,6 +585,11 @@
+                 don_acks = stats.acks,
+                 ack_samples = stats.ack_ms.len(),
+                 ack_unmatched = stats.unmatched,
++                rr_samples = stats.report_rtt_ms.len(),
++                rr_rtt_p50_ms = ?pct(&mut stats.report_rtt_ms, 0.5),
++                rr_rtt_p95_ms = ?pct(&mut stats.report_rtt_ms, 0.95),
++                ack_bursts = stats.ack_bursts,
++                ack_burst_gap_p50_ms = ?pct(&mut stats.burst_gaps_ms, 0.5),
+                 send_to_ack_p50_ms = ?pct(&mut stats.ack_ms, 0.5),
+                 send_to_ack_p95_ms = ?pct(&mut stats.ack_ms, 0.95),
+                 firs = stats.firs,
+@@ -601,6 +614,9 @@
+             );
+             stats.ack_ms.clear();
+             stats.unmatched = 0;
++            stats.report_rtt_ms.clear();
++            stats.ack_bursts = 0;
++            stats.burst_gaps_ms.clear();
+             stats.submit_ms.clear();
+             stats.present_to_ready_ms.clear();
+             last_log = Instant::now();
+@@ -663,6 +679,17 @@
+                 stats.acks += 1;
+                 if let Some(ms) = arrival.and_then(|t| sent.lock().unwrap().ack(don as u16, t)) {
+                     stats.ack_ms.push(ms);
++                    if let Some(at) = arrival {
++                        let gap = stats.last_ack_arrival.and_then(|prev| at.duration_since(prev).ok());
++                        // A burst starts after at least 5 ms without a matched ACK.
++                        if gap.is_none_or(|d| d >= Duration::from_millis(5)) {
++                            stats.ack_bursts += 1;
++                            if let Some(d) = gap {
++                                stats.burst_gaps_ms.push(d.as_secs_f64() * 1000.0);
++                            }
++                        }
++                        stats.last_ack_arrival = Some(at);
++                    }
+                 } else {
+                     stats.unmatched += 1;
+                 }
+@@ -672,7 +699,17 @@
+                     stats.feedback = Some(fb);
+                 }
+             }
+-            RtcpEvent::ReceiverReport { .. } | RtcpEvent::Sdes => {}
++            RtcpEvent::ReceiverReport { blocks, .. } | RtcpEvent::SenderReport { blocks, .. } => {
++                if let Some(at) = arrival {
++                    let ledger = sent.lock().unwrap();
++                    for block in blocks {
++                        if let Some(ms) = ledger.report_rtt(block.ssrc, block.last_sr, block.delay_since_last_sr, at) {
++                            stats.report_rtt_ms.push(ms);
++                        }
++                    }
++                }
++            }
++            RtcpEvent::Sdes => {}
+             other => {
+                 stats.other_rtcp += 1;
+                 if stats.other_rtcp <= 20 {

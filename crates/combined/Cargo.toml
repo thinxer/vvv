@@ -1,0 +1,36 @@
+[workspace]
+
+[package]
+name = "vvv-remote"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+name = "vvv_remote"
+path = "../apple/service.rs"
+
+[[bin]]
+name = "vvv-combined"
+path = "src/main.rs"
+
+[features]
+default = ["combined"]
+combined = ["dep:vvv-rdp", "dep:vvv-session"]
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "net", "macros", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+socket2 = "0.6"
+wayshare = { path = "../../.cache/apple-build/pure/wayshare", default-features = false, features = ["apple-guest"] }
+vvv-rdp = { path = "../ironrdp", optional = true }
+vvv-session = { path = "../session", optional = true }
+cuda-scanout = { path = "../cuda-scanout" }
+wayland-capture = { path = "../wayland-capture" }
+libc = "0.2"
