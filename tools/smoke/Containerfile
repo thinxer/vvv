@@ -1,0 +1,8 @@
+FROM docker.io/library/python:3.13-trixie
+RUN apt-get update && apt-get install -y --no-install-recommends freerdp3-dev && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir av cryptography pycryptodome \
+    && pip install --no-cache-dir --no-deps git+https://github.com/renegadelink/iShareScreen.git@9ab40d3a3151524f954cff9d6239d891197c1705
+COPY rdp.c /tmp/rdp.c
+RUN cc -O2 -o /usr/local/bin/rdp-probe /tmp/rdp.c $(pkg-config --cflags --libs freerdp-client3 freerdp3 winpr3)
+COPY apple.py /smoke/apple.py
+ENTRYPOINT ["python", "-u", "/smoke/apple.py"]

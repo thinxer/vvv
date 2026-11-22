@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [[ -f "$root/.podman/storage.conf" ]]; then
+    export CONTAINERS_STORAGE_CONF="$root/.podman/storage.conf"
+    exec podman "$@"
+fi
+exec podman --root "$root/.podman/storage" --runroot "$root/.podman/run" "$@"

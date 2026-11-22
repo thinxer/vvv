@@ -1,0 +1,10 @@
+[workspace]
+
+[package]
+name = "sdk-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+apple-screen-sharing = { path = "../../../crates/apple-screen-sharing" }

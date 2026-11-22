@@ -6,7 +6,7 @@ The tested platform is AArch64 Linux with NVIDIA GB10. An isolated guest enumera
 
 ## Bring your own guest
 
-Run `./build.sh` to build the workspace launcher, CUDA presenter and combined receiver. The full build needs libclang and a C compiler. The reusable Apple protocol crate builds separately with Cargo. VM launch also requires a compatible crosvm binary, the CUDA presenter patch, and virglrenderer built with Venus and a render server. The tested configuration uses the threaded render server and worker. See [source release readiness](docs/release-readiness.md) for pins and clean-machine prerequisites.
+From a fresh Linux checkout with Podman, run `tools/verify/run` to build and test. See [verification](docs/verification.md) for the GPU smoke test. Run `./build.sh` to build the workspace launcher, CUDA presenter and combined receiver. The full build needs libclang and a C compiler. The reusable Apple protocol crate builds separately with Cargo. VM launch also requires a compatible crosvm binary, the CUDA presenter patch, and virglrenderer built with Venus and a render server. The tested configuration uses the threaded render server and worker. See [source release readiness](docs/release-readiness.md) for pins and clean-machine prerequisites.
 
 Start the receiver first, then boot a guest in a second terminal:
 

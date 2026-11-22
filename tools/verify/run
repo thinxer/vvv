@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+tools/podman build -t localhost/vvv-verify -f tools/verify/Containerfile tools/verify
+mkdir -p .cache/verify/cargo .cache/verify/target
+exec tools/podman run --rm --userns keep-id -v "$PWD:/workspace" \
+    -e CARGO_TARGET_DIR=/workspace/.cache/verify/target -e CARGO_HOME=/workspace/.cache/verify/cargo -e CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    localhost/vvv-verify bash tools/verify/check

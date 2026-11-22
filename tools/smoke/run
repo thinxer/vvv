@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Exercise a dedicated combined receiver launched on the documented loopback ports.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+log=${1:?usage: tools/smoke/run PATH_TO_DEDICATED_RECEIVER_LOG}
+offset=$(stat -c %s "$log")
+tools/podman build -t localhost/vvv-smoke -f tools/smoke/Containerfile tools/smoke
+tools/podman run --rm --network host --http-proxy=false \
+    -v "$PWD/crates/apple-screen-sharing/tests/fixtures/msg29-0.bin:/smoke/msg29.bin:ro" \
+    localhost/vvv-smoke
+events=$(tail -c "+$((offset + 1))" "$log")
+for event in 'Apple viewer [0-9]+ joined \(primary=true\)' 'RDP viewer [0-9]+ joined \(primary=false\)' 'RDP viewer [0-9]+ took control' 'IronRDP EGFX AVC420 NVENC surface 864x1024'; do
+    grep -Eq "$event" <<< "$events" || { echo "Missing receiver event: $event" >&2; exit 1; }
+done
+echo "Verified RDP paint, control handoff and portrait resize"

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+./build.sh
+cargo test --locked --workspace --release
+cargo check --locked -p vvv-remote --no-default-features --example embed
+# Resolve the consumer as a separate workspace using the versions tested above.
+mkdir -p .cache/verify
+consumer=$(mktemp -d .cache/verify/sdk-XXXXXX)
+trap 'rm -rf "$consumer"' EXIT
+cp -r tools/verify/sdk/. "$consumer/"
+cp Cargo.lock "$consumer/"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
+cargo run --release --offline --manifest-path "$consumer/Cargo.toml"
+deps=$(cargo tree --offline --manifest-path "$consumer/Cargo.toml" --prefix none)
+if grep -Eq '^(cuda-scanout|vvv-nvenc[^ ]*|bindgen|ironrdp[^ ]*) v' <<< "$deps"; then
+    echo "Apple protocol consumer pulled in a GPU or RDP dependency" >&2
+    exit 1
+fi
