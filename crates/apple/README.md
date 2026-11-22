@@ -5,20 +5,20 @@ This receiver sends the guest's active crosvm scanout through WayShare using NVI
 From the workspace root, build the receiver:
 
 ```sh
-streamer/apple/build.sh
+crates/apple/build.sh
 ```
 
 Replace the example address with a trusted LAN address reachable from your Mac. In a second terminal, boot the dedicated guest:
 
 ```sh
-streamer/apple/run.sh serve-dev --listen 192.0.2.10:5990
+crates/apple/run.sh serve-dev --listen 192.0.2.10:5990
 ```
 
 ```sh
-streamer/apple/guest.sh
+crates/apple/guest.sh
 ```
 
-Open `vnc://192.0.2.10:5990` in Screen Sharing on the Mac, select **High Performance**, and enter any username and password. Anyone who can reach this development listener can control its guest. For a password-checked session, run `streamer/apple/run.sh set-password --user vvv` and start the listener with `serve`. TCP 5990 carries session control. UDP 5992 carries video and its feedback. UDP 5994 carries audio and its feedback. The listener starts accepting viewers after the guest publishes its first frame.
+Open `vnc://192.0.2.10:5990` in Screen Sharing on the Mac, select **High Performance**, and enter any username and password. Anyone who can reach this development listener can control its guest. For a password-checked session, run `crates/apple/run.sh set-password --user vvv` and start the listener with `serve`. TCP 5990 carries session control. UDP 5992 carries video and its feedback. UDP 5994 carries audio and its feedback. The listener starts accepting viewers after the guest publishes its first frame.
 
 The launcher copies the base KDE disk on first use. Its disk, sockets and verifier live under `.cache/apple-build/session`. Set `APPLE_STATE_DIR` consistently for both commands to use another private session directory. To stop the trial, shut down the guest and interrupt the foreground receiver.
 

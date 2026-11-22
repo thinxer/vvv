@@ -1,6 +1,6 @@
 # RDP receiver
 
-Build the Rust receiver from the workspace root with `streamer/ironrdp/build.sh`. Cargo produces `target/debug/wayland-ironrdp-receiver`. Wayland capture, input, crosvm resize coordination, RDP, and the NVENC driver interface are implemented in Rust. At build time bindgen reads the vendored NVIDIA header using libclang. Supply `--mouse-sock` and `--keyboard-sock` for virtio input, and `--crosvm-sock` for client-requested resizing.
+Build the Rust receiver from the workspace root with `crates/ironrdp/build.sh`. Cargo produces `target/debug/wayland-ironrdp-receiver`. Wayland capture, input, crosvm resize coordination, RDP, and the NVENC driver interface are implemented in Rust. At build time bindgen reads the vendored NVIDIA header using libclang. Supply `--mouse-sock` and `--keyboard-sock` for virtio input, and `--crosvm-sock` for client-requested resizing.
 
 The receiver takes a Wayland socket, capture directory, virtio input sockets and crosvm control socket. The default IronRDP port is 3389. In combined mode, additional viewers observe the desktop and can click **Take control** to become primary. Takeover and disconnect release held keys and buttons. This development endpoint uses TLS with a per-process self-signed certificate and accepts clients without credentials.
 
@@ -10,10 +10,10 @@ Clients with the RDP graphics channel receive changed rectangles encoded with lo
 
 The IronRDP crates are pinned together at upstream revision e0727394, which corrects the AVC region bounds used on the wire. The streamer uses the upstream source directly.
 
-The native backend builds against the NVIDIA header from `nv-codec-headers` tag `n13.0.19.0` in `streamer/third_party/nvenc`. Encoding requires a driver supporting NVENC API 13.0.
+The native backend builds against the NVIDIA header from `nv-codec-headers` tag `n13.0.19.0` in `vendor/nvenc`. Encoding requires a driver supporting NVENC API 13.0.
 
 ### CUDA scanout on Linux
 
-Build the receiver and the Rust presenter with `streamer/ironrdp/build.sh --cuda`. The crosvm binary also needs the workspace's GPU scanout hook and the `gpu,virgl_renderer` features. Start the receiver first with `--nvenc --cuda-socket PATH` in addition to the usual Wayland and input arguments. Use a private directory for the local socket. For the KDE guest, set `VVV_CUDA_SOCKET` to the same absolute path and set `LD_PRELOAD` to the absolute path of `target/debug/libcuda_scanout.so` on the crosvm process.
+Build the receiver and the Rust presenter with `crates/ironrdp/build.sh --cuda`. The crosvm binary also needs the workspace's GPU scanout hook and the `gpu,virgl_renderer` features. Start the receiver first with `--nvenc --cuda-socket PATH` in addition to the usual Wayland and input arguments. Use a private directory for the local socket. For the KDE guest, set `VVV_CUDA_SOCKET` to the same absolute path and set `LD_PRELOAD` to the absolute path of `target/debug/libcuda_scanout.so` on the crosvm process.
 
 On each supported primary scanout the receiver allocates a pitched CUDA buffer. The presenter maps the virgl GL texture, copies it into that buffer, synchronizes and closes the IPC mapping. The receiver retains the frame through NVENC completion. Its log reports `IronRDP submitted CUDA IPC AVC420` when the first GPU frame enters a new H.264 surface. Cursor updates still use Wayland. Unsupported scanout formats use the existing Wayland pixel path, and legacy bitmap and ClearCodec clients can read back a GPU frame.
