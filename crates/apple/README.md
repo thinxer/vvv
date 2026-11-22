@@ -13,6 +13,6 @@ Open `vnc://192.0.2.10:5990` in Screen Sharing and select **High Performance**. 
 
 The Rust receiver uses the workspace `wayland-capture` crate for owned BGRX scanouts, sends resize requests directly over the crosvm control socket, and encodes HEVC through the NVIDIA driver. Audio is a 48 kHz stereo AAC-ELD silence track. Each 10 ms packet carries the same 160-byte reference access unit with a fresh RTP sequence number, timestamp and authentication tag.
 
-The protocol and transport live in `apple-screen-sharing`. The `vvv-nvenc` crate generates NVIDIA bindings and supplies the HEVC strip encoder. The `vvv-combined` process runs natively and loads the host driver libraries.
+The protocol and transport live in `apple-screen-sharing`. The `vvv-nvenc` crate supplies the HEVC strip encoder. Both video encoders use `vvv-nvenc-driver` for the generated NVIDIA bindings and driver session lifetime. The `vvv-combined` process runs natively and loads the host driver libraries.
 
 When launched with `vvv serve --protocol apple --session mac --cuda` and `vvv guest --session mac --cuda`, the guest presents supported RGBA textures through CUDA IPC. A device kernel converts each HEVC tile to BT.709 NV12 and extends the last tile to its coded height. NVENC consumes that surface directly. Standard framebuffer requests can read back the GPU frame, and unsupported guest scanouts use the Wayland pixel path. Cursor images continue to arrive over Wayland.

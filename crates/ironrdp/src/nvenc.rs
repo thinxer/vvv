@@ -1,20 +1,8 @@
 //! NVIDIA API 13 encoder. The driver owns the buffers; each session is used serially.
 use anyhow::{Context, Result, ensure};
-use libloading::Library;
-use std::{ffi::c_void, ptr, slice};
+use std::{ptr, slice};
 
-#[allow(
-    non_camel_case_types,
-    non_snake_case,
-    non_upper_case_globals,
-    dead_code,
-    unsafe_op_in_unsafe_fn,
-    unnecessary_transmutes
-)]
-mod sdk {
-    include!(concat!(env!("OUT_DIR"), "/nvenc.rs"));
-}
-use sdk::*;
+use vvv_nvenc_driver::{Handle, Session, sys::*};
 
 const H264: GUID = GUID {
     Data1: 0x6bc82762,
@@ -35,29 +23,21 @@ const P4: GUID = GUID {
     Data4: [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81],
 };
 
-type Handle = *mut c_void;
-type Release = unsafe extern "C" fn(i32) -> i32;
 pub struct Nvenc {
-    _cuda: Library,
-    _driver: Library,
-    api: NV_ENCODE_API_FUNCTION_LIST,
-    release: Release,
-    device: i32,
-    context: Handle,
-    session: Handle,
     input: Handle,
     output: Handle,
     locked: bool,
     visible: (usize, usize),
     coded: (u32, u32),
     pts: u64,
+    driver: Session,
 }
 // The CUDA primary context and NVENC session support calls from different threads.
 // Graphics holds the per-session mutex across every operation.
 unsafe impl Send for Nvenc {}
 macro_rules! call {
     ($enc:expr,$f:ident,$($arg:expr),+)=>{{
-        let f=$enc.api.$f.context(stringify!($f))?;
+        let f=$enc.driver.api().$f.context(stringify!($f))?;
         let status=unsafe{f($($arg),+)};
         ensure!(status==NV_ENC_SUCCESS,"{} returned {}",stringify!($f),status);
     }};
@@ -69,45 +49,8 @@ impl Nvenc {
             width > 0 && height > 0 && width % 2 == 0 && height % 2 == 0,
             "NV12 requires even dimensions"
         );
-        let cuda = unsafe { Library::new("libcuda.so.1")? };
-        let driver = unsafe { Library::new("libnvidia-encode.so.1")? };
-        let mut api = NV_ENCODE_API_FUNCTION_LIST {
-            version: RUST_NV_ENCODE_API_FUNCTION_LIST_VER,
-            ..Default::default()
-        };
-        let mut device = 0;
-        let (context, release) = unsafe {
-            let init = cuda.get::<unsafe extern "C" fn(u32) -> i32>(b"cuInit")?;
-            let get = cuda.get::<unsafe extern "C" fn(*mut i32, i32) -> i32>(b"cuDeviceGet")?;
-            let retain = cuda.get::<unsafe extern "C" fn(*mut Handle, i32) -> i32>(
-                b"cuDevicePrimaryCtxRetain",
-            )?;
-            let release = *cuda.get::<Release>(b"cuDevicePrimaryCtxRelease_v2")?;
-            let create =
-                driver
-                    .get::<unsafe extern "C" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS>(
-                        b"NvEncodeAPICreateInstance",
-                    )?;
-            ensure!(
-                create(&mut api) == NV_ENC_SUCCESS,
-                "NVENC API 13 unavailable"
-            );
-            ensure!(
-                init(0) == 0 && get(&mut device, 0) == 0,
-                "CUDA device 0 unavailable"
-            );
-            let mut ctx = ptr::null_mut();
-            ensure!(retain(&mut ctx, device) == 0, "retain CUDA primary context");
-            (ctx, release)
-        };
         let mut enc = Self {
-            _cuda: cuda,
-            _driver: driver,
-            api,
-            release,
-            device,
-            context,
-            session: ptr::null_mut(),
+            driver: Session::open()?,
             input: ptr::null_mut(),
             output: ptr::null_mut(),
             locked: false,
@@ -123,14 +66,6 @@ impl Nvenc {
     }
     fn initialize(&mut self, avg_bitrate: u32) -> Result<()> {
         let (w, h) = self.coded;
-        let mut open = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
-            version: RUST_NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
-            apiVersion: RUST_NVENCAPI_VERSION,
-            deviceType: NV_ENC_DEVICE_TYPE_CUDA,
-            device: self.context,
-            ..Default::default()
-        };
-        call!(self, nvEncOpenEncodeSessionEx, &mut open, &mut self.session);
         let mut preset = NV_ENC_PRESET_CONFIG {
             version: RUST_NV_ENC_PRESET_CONFIG_VER,
             ..Default::default()
@@ -139,7 +74,7 @@ impl Nvenc {
         call!(
             self,
             nvEncGetEncodePresetConfigEx,
-            self.session,
+            self.driver.handle(),
             H264,
             P4,
             NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
@@ -176,7 +111,12 @@ impl Nvenc {
             encodeConfig: cfg,
             ..Default::default()
         };
-        call!(self, nvEncInitializeEncoder, self.session, &mut init);
+        call!(
+            self,
+            nvEncInitializeEncoder,
+            self.driver.handle(),
+            &mut init
+        );
         let mut input = NV_ENC_CREATE_INPUT_BUFFER {
             version: RUST_NV_ENC_CREATE_INPUT_BUFFER_VER,
             width: w,
@@ -184,13 +124,23 @@ impl Nvenc {
             bufferFmt: NV_ENC_BUFFER_FORMAT_NV12,
             ..Default::default()
         };
-        call!(self, nvEncCreateInputBuffer, self.session, &mut input);
+        call!(
+            self,
+            nvEncCreateInputBuffer,
+            self.driver.handle(),
+            &mut input
+        );
         self.input = input.inputBuffer;
         let mut output = NV_ENC_CREATE_BITSTREAM_BUFFER {
             version: RUST_NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
             ..Default::default()
         };
-        call!(self, nvEncCreateBitstreamBuffer, self.session, &mut output);
+        call!(
+            self,
+            nvEncCreateBitstreamBuffer,
+            self.driver.handle(),
+            &mut output
+        );
         self.output = output.bitstreamBuffer;
         Ok(())
     }
@@ -202,7 +152,12 @@ impl Nvenc {
             "invalid NV12 planes"
         );
         if self.locked {
-            call!(self, nvEncUnlockBitstream, self.session, self.output);
+            call!(
+                self,
+                nvEncUnlockBitstream,
+                self.driver.handle(),
+                self.output
+            );
             self.locked = false;
         }
         let mut lock = NV_ENC_LOCK_INPUT_BUFFER {
@@ -210,7 +165,7 @@ impl Nvenc {
             inputBuffer: self.input,
             ..Default::default()
         };
-        call!(self, nvEncLockInputBuffer, self.session, &mut lock);
+        call!(self, nvEncLockInputBuffer, self.driver.handle(), &mut lock);
         let pitch = lock.pitch as usize;
         let valid = !lock.bufferDataPtr.is_null() && lock.pitch >= cw;
         if valid {
@@ -225,7 +180,12 @@ impl Nvenc {
             upload(luma, pitch, y, w, h, cw as usize, 1);
             upload(chroma, pitch, uv, w, h / 2, cw as usize, 2);
         }
-        call!(self, nvEncUnlockInputBuffer, self.session, self.input);
+        call!(
+            self,
+            nvEncUnlockInputBuffer,
+            self.driver.handle(),
+            self.input
+        );
         ensure!(valid, "invalid NVENC input buffer");
         self.picture(self.input, NV_ENC_BUFFER_FORMAT_NV12, 0)?;
         let bits = self.lock_packet()?;
@@ -235,7 +195,12 @@ impl Nvenc {
     pub fn encode_gpu(&mut self, frame: &cuda_scanout::Frame) -> Result<&[u8]> {
         let (w, h) = self.coded;
         if self.locked {
-            call!(self, nvEncUnlockBitstream, self.session, self.output);
+            call!(
+                self,
+                nvEncUnlockBitstream,
+                self.driver.handle(),
+                self.output
+            );
             self.locked = false;
         }
         let mut registration = NV_ENC_REGISTER_RESOURCE {
@@ -248,7 +213,12 @@ impl Nvenc {
             bufferFormat: NV_ENC_BUFFER_FORMAT_ABGR,
             ..Default::default()
         };
-        call!(self, nvEncRegisterResource, self.session, &mut registration);
+        call!(
+            self,
+            nvEncRegisterResource,
+            self.driver.handle(),
+            &mut registration
+        );
         let registered = registration.registeredResource;
         let mut map = NV_ENC_MAP_INPUT_RESOURCE {
             version: RUST_NV_ENC_MAP_INPUT_RESOURCE_VER,
@@ -256,19 +226,24 @@ impl Nvenc {
             ..Default::default()
         };
         let result = (|| -> Result<NV_ENC_LOCK_BITSTREAM> {
-            call!(self, nvEncMapInputResource, self.session, &mut map);
+            call!(self, nvEncMapInputResource, self.driver.handle(), &mut map);
             let encoded = self
                 .picture(map.mappedResource, map.mappedBufferFmt, frame.pitch as u32)
                 .and_then(|_| self.lock_packet());
             call!(
                 self,
                 nvEncUnmapInputResource,
-                self.session,
+                self.driver.handle(),
                 map.mappedResource
             );
             encoded
         })();
-        call!(self, nvEncUnregisterResource, self.session, registered);
+        call!(
+            self,
+            nvEncUnregisterResource,
+            self.driver.handle(),
+            registered
+        );
         let bits = result?;
         self.bitstream(bits)
     }
@@ -288,7 +263,7 @@ impl Nvenc {
             ..Default::default()
         };
         self.pts += 1;
-        call!(self, nvEncEncodePicture, self.session, &mut pic);
+        call!(self, nvEncEncodePicture, self.driver.handle(), &mut pic);
         Ok(())
     }
     fn lock_packet(&mut self) -> Result<NV_ENC_LOCK_BITSTREAM> {
@@ -297,7 +272,7 @@ impl Nvenc {
             outputBitstream: self.output,
             ..Default::default()
         };
-        call!(self, nvEncLockBitstream, self.session, &mut bits);
+        call!(self, nvEncLockBitstream, self.driver.handle(), &mut bits);
         self.locked = true;
         ensure!(
             !bits.bitstreamBufferPtr.is_null() && bits.bitstreamSizeInBytes > 0,
@@ -339,26 +314,12 @@ impl Drop for Nvenc {
     fn drop(&mut self) {
         unsafe {
             if self.locked {
-                if let Some(f) = self.api.nvEncUnlockBitstream {
-                    f(self.session, self.output);
+                if let Some(f) = self.driver.api().nvEncUnlockBitstream {
+                    f(self.driver.handle(), self.output);
                 }
             }
-            if !self.output.is_null() {
-                if let Some(f) = self.api.nvEncDestroyBitstreamBuffer {
-                    f(self.session, self.output);
-                }
-            }
-            if !self.input.is_null() {
-                if let Some(f) = self.api.nvEncDestroyInputBuffer {
-                    f(self.session, self.input);
-                }
-            }
-            if !self.session.is_null() {
-                if let Some(f) = self.api.nvEncDestroyEncoder {
-                    f(self.session);
-                }
-            }
-            (self.release)(self.device);
+            self.driver.destroy_bitstream(self.output);
+            self.driver.destroy_input(self.input);
         }
     }
 }

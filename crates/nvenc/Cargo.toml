@@ -5,12 +5,9 @@ edition = "2024"
 license = "MIT AND Apache-2.0"
 publish = false
 
-[build-dependencies]
-bindgen = "0.72"
-
 [dependencies]
 anyhow = "1"
 apple-screen-sharing = { path = "../apple-screen-sharing" }
 cuda-scanout = { path = "../cuda-scanout" }
-libloading = "0.9"
+vvv-nvenc-driver = { path = "../nvenc-driver" }
 tracing = "0.1"

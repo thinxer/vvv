@@ -7,7 +7,7 @@ publish = false
 
 [workspace]
 resolver = "3"
-members = ["crates/apple", "crates/combined", "crates/apple-screen-sharing", "crates/nvenc", "crates/session", "crates/ironrdp", "crates/wayland-capture", "crates/cuda-scanout"]
+members = ["crates/apple", "crates/combined", "crates/apple-screen-sharing", "crates/nvenc", "crates/nvenc-driver", "crates/session", "crates/ironrdp", "crates/wayland-capture", "crates/cuda-scanout"]
 exclude = [".cache", ".local", "crosvm"]
 
 [profile.dev.package.yuv]

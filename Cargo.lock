@@ -3616,10 +3616,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "apple-screen-sharing",
- "bindgen",
  "cuda-scanout",
- "libloading 0.9.0",
  "tracing",
+ "vvv-nvenc-driver",
+]
+
+[[package]]
+name = "vvv-nvenc-driver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "libloading 0.9.0",
 ]
 
 [[package]]
@@ -3628,7 +3636,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "bindgen",
  "bytes",
  "cuda-scanout",
  "ironrdp-core",
@@ -3639,10 +3646,10 @@ dependencies = [
  "ironrdp-pdu",
  "ironrdp-server",
  "ironrdp-svc",
- "libloading 0.8.9",
  "rcgen",
  "tokio",
  "tokio-rustls",
+ "vvv-nvenc-driver",
  "vvv-session",
  "yuv",
 ]

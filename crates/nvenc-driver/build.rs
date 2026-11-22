@@ -22,9 +22,9 @@ fn main() {
         .derive_default(true)
         .generate_comments(false)
         .generate()
-        .expect("generate Apple NVENC bindings")
+        .expect("generate NVENC bindings")
         .write_to_file(
             std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("nvenc.rs"),
         )
-        .expect("write Apple NVENC bindings");
+        .expect("write NVENC bindings");
 }

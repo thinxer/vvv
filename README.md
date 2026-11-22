@@ -26,6 +26,7 @@ Supply a dedicated writable disk for this VM. The custom launcher opens it direc
 | `vvv-remote` (`crates/combined`) | `serve(ServerConfig, shutdown)` embeds the remote desktop service. The caller supplies a multithreaded Tokio runtime and shutdown future. The default feature enables both protocols. Disable default features for Apple alone. |
 | `apple-screen-sharing` | `Config` and `serve` provide the RFB server. Attach `HpServer` with your own `ExternalScreen` and `EncoderFactory` for High Performance. |
 | `vvv-apple` and `vvv-nvenc` | `configure_video` connects a host framebuffer to standard and NVENC High Performance video. |
+| `vvv-nvenc-driver` | Shared NVENC API 13 bindings, CUDA primary-context retention and encoder session lifetime for HEVC and H.264. |
 | `vvv-rdp` (`crates/ironrdp`) | `start_on`, `Receiver` and the input callback embed an RDP endpoint directly. Supply captured frames, cursor updates and guest input handling. |
 | `vvv-session` | `ViewerSeat` coordinates control, resize preferences, observer views and ownership changes across protocol adapters. |
 | `wayland-capture` | `CaptureSink` receives guest frames and cursor planes from the crosvm Wayland socket. |

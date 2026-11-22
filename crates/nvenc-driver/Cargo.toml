@@ -1,0 +1,13 @@
+[package]
+name = "vvv-nvenc-driver"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+bindgen = "0.72"
+
+[dependencies]
+anyhow = "1"
+libloading = "0.9"
