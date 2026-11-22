@@ -8,19 +8,12 @@ publish = false
 [lib]
 crate-type = ["staticlib","rlib"]
 
-[[bin]]
-name = "wayland-ironrdp-receiver"
-path = "src/main.rs"
-
 [build-dependencies]
 bindgen = "0.72"
 
 [dependencies]
 vvv-session = { path = "../session" }
 libloading = "0.8"
-signal-hook = "0.3"
-serde_json = "1"
-wayland-capture = { path = "../wayland-capture" }
 yuv = "0.8.20"
 anyhow = "1"
 async-trait = "0.1"

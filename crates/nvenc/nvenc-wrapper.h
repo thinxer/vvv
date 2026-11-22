@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: MIT
+// Bindgen needs integer definitions for the SDK's function-like version macros.
+#include "nvEncodeAPI.h"
+static const unsigned int RUST_NVENCAPI_VERSION = NVENCAPI_VERSION;
+static const unsigned int RUST_NV_ENCODE_API_FUNCTION_LIST_VER = NV_ENCODE_API_FUNCTION_LIST_VER;
+static const unsigned int RUST_NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
+static const unsigned int RUST_NV_ENC_PRESET_CONFIG_VER = NV_ENC_PRESET_CONFIG_VER;
+static const unsigned int RUST_NV_ENC_CONFIG_VER = NV_ENC_CONFIG_VER;
+static const unsigned int RUST_NV_ENC_INITIALIZE_PARAMS_VER = NV_ENC_INITIALIZE_PARAMS_VER;
+static const unsigned int RUST_NV_ENC_CREATE_INPUT_BUFFER_VER = NV_ENC_CREATE_INPUT_BUFFER_VER;
+static const unsigned int RUST_NV_ENC_CREATE_BITSTREAM_BUFFER_VER = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+static const unsigned int RUST_NV_ENC_RECONFIGURE_PARAMS_VER = NV_ENC_RECONFIGURE_PARAMS_VER;
+static const unsigned int RUST_NV_ENC_LOCK_INPUT_BUFFER_VER = NV_ENC_LOCK_INPUT_BUFFER_VER;
+static const unsigned int RUST_NV_ENC_PIC_PARAMS_VER = NV_ENC_PIC_PARAMS_VER;
+static const unsigned int RUST_NV_ENC_LOCK_BITSTREAM_VER = NV_ENC_LOCK_BITSTREAM_VER;
+static const unsigned int RUST_NV_ENC_REGISTER_RESOURCE_VER = NV_ENC_REGISTER_RESOURCE_VER;
+static const unsigned int RUST_NV_ENC_MAP_INPUT_RESOURCE_VER = NV_ENC_MAP_INPUT_RESOURCE_VER;

@@ -1,0 +1,29 @@
+# Modified for vvv from WayShare. SPDX-License-Identifier: Apache-2.0
+[package]
+name = "apple-screen-sharing"
+version = "0.4.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+aes = "0.9"
+anyhow = "1"
+bytes = "1"
+demand = "2"
+flate2 = "1"
+hmac = "0.13"
+libc = "0.2"
+libloading = "0.9"
+md-5 = "0.11"
+num-bigint = "0.5"
+pbkdf2 = "0.13"
+plist = "1"
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+sha1 = "0.11"
+sha2 = "0.11"
+socket2 = "0.6"
+subtle = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"

@@ -9,7 +9,7 @@ use std::process::Command;
 const USAGE: &str =
     "vvv serve --protocol rdp|apple|both --session NAME [--dev-login] [--cuda] [--avg-bitrate BPS] [-- RECEIVER_OPTIONS...]
 vvv guest --session NAME [--kernel PATH --disk PATH [--initrd PATH] | --example kde] [--cuda]
-vvv set-password --session NAME -- --user USER [--password-file /state/FILE]";
+vvv set-password --session NAME -- --user USER [--password-file PATH]";
 
 fn workspace() -> Result<PathBuf, Box<dyn Error>> {
     if let Some(path) = env::var_os("VVV_ROOT") {
@@ -18,7 +18,7 @@ fn workspace() -> Result<PathBuf, Box<dyn Error>> {
     for start in [env::current_exe()?, env::current_dir()?] {
         for dir in start.ancestors() {
             if dir.join("guest/start-session.sh").is_file()
-                && dir.join("crates/apple/run.sh").is_file()
+                && dir.join("crates/combined/Cargo.toml").is_file()
             {
                 return Ok(dir.to_owned());
             }
@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let root = workspace()?;
     let state = root.join(".local/sessions").join(name);
-    let apple = root.join("crates/apple/run.sh");
+    let receiver = root.join("target/release/vvv-combined");
     let mut cmd = match (action.as_str(), protocol.as_deref()) {
         ("guest", None) if options.is_empty() => match (example.as_deref(), kernel, disk, initrd) {
             (None, Some(kernel), Some(disk), initrd) => vvv::GuestConfig {
@@ -112,59 +112,48 @@ fn main() -> Result<(), Box<dyn Error>> {
                 );
             }
         },
-        ("serve", Some("rdp")) if !dev => {
-            let receiver = env::current_exe()?.with_file_name("wayland-ironrdp-receiver");
+        ("serve", Some(mode @ ("rdp" | "apple" | "both"))) => {
             if !receiver.is_file() {
-                return Err("missing sibling RDP receiver; run ./build.sh".into());
-            }
-            let mut cmd = locked_receiver(&state, &receiver);
-            let mut libs = vec![root.join("runtime/lib")];
-            if let Some(old) = env::var_os("LD_LIBRARY_PATH") {
-                libs.extend(env::split_paths(&old));
-            }
-            cmd.env("LD_LIBRARY_PATH", env::join_paths(libs)?);
-            cmd.arg(state.join("frames.sock"))
-                .arg(state.join("captures"))
-                .arg("--mouse-sock")
-                .arg(state.join("mouse.sock"))
-                .arg("--keyboard-sock")
-                .arg(state.join("keyboard.sock"))
-                .arg("--crosvm-sock")
-                .arg(state.join("crosvm.sock"));
-            if cuda {
-                cmd.arg("--cuda-socket").arg(state.join("cuda.sock"));
-            }
-            cmd
-        }
-        ("serve", Some("both")) => {
-            let binary = root.join("target/release/vvv-combined");
-            if !binary.is_file() {
                 return Err("missing combined receiver; run ./build.sh".into());
             }
-            let mut cmd = locked_receiver(&state, &binary);
-            cmd.arg("--socket").arg(state.join("frames.sock"));
-            if dev {
-                cmd.arg("--dev-login");
-            } else {
-                cmd.arg("--srp-file").arg(state.join("verifier"));
+            let mut cmd = locked_receiver(&state, &receiver);
+            cmd.arg("--protocol")
+                .arg(mode)
+                .arg("--socket")
+                .arg(state.join("frames.sock"));
+            if mode == "rdp"
+                && !options
+                    .iter()
+                    .any(|arg| arg == "--listen" || arg.starts_with("--listen="))
+            {
+                cmd.args(["--listen", "0.0.0.0:5990"]);
+            }
+            if mode != "rdp" {
+                if dev {
+                    cmd.arg("--dev-login");
+                } else {
+                    cmd.arg("--srp-file").arg(state.join("verifier"));
+                }
             }
             if cuda {
                 cmd.arg("--cuda-socket").arg(state.join("cuda.sock"));
             }
-            cmd
-        }
-        ("serve", Some("apple")) => {
-            let mut cmd = locked_receiver(&state, &apple);
-            cmd.arg(if dev { "serve-dev" } else { "serve" });
-            if cuda {
-                cmd.arg("--cuda-socket").arg("/state/cuda.sock");
-            }
-            cmd.env("APPLE_STATE_DIR", &state);
             cmd
         }
         ("set-password", None) => {
-            let mut cmd = Command::new(apple);
-            cmd.arg("set-password").env("APPLE_STATE_DIR", &state);
+            let mut args = options.iter_mut();
+            while let Some(flag) = args.next() {
+                if flag == "--password-file"
+                    && let Some(path) = args.next()
+                    && let Some(relative) = path.strip_prefix("/state/")
+                {
+                    *path = state.join(relative).to_string_lossy().into_owned();
+                }
+            }
+            let mut cmd = Command::new(receiver);
+            cmd.arg("set-password")
+                .arg("--srp-file")
+                .arg(state.join("verifier"));
             cmd
         }
         _ => return Err(USAGE.into()),

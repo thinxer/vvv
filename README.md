@@ -6,7 +6,7 @@ The tested platform is AArch64 Linux with NVIDIA GB10. An isolated guest enumera
 
 ## Bring your own guest
 
-Build the receivers with `./build.sh`. The current build uses a workspace-local Rust toolchain and Cargo caches, Podman, libclang, and the pinned WayShare overlay. VM launch also requires a compatible crosvm binary, the CUDA presenter patch, and virglrenderer built with Venus and a render server. The tested configuration uses the threaded render server and worker. See [source release readiness](docs/release-readiness.md) for pins and clean-machine prerequisites.
+Run `./build.sh` to build the workspace launcher, CUDA presenter and combined receiver. The full build needs libclang and a C compiler. The reusable Apple protocol crate builds separately with Cargo. VM launch also requires a compatible crosvm binary, the CUDA presenter patch, and virglrenderer built with Venus and a render server. The tested configuration uses the threaded render server and worker. See [source release readiness](docs/release-readiness.md) for pins and clean-machine prerequisites.
 
 Start the receiver first, then boot a guest in a second terminal:
 
@@ -24,12 +24,14 @@ Supply a dedicated writable disk for this VM. The custom launcher opens it direc
 | --- | --- |
 | `vvv` | `GuestConfig::command` constructs a process command for a caller-supplied kernel, disk, optional initramfs and session directory. The application owns the child and the asset lifecycle. |
 | `vvv-remote` (`crates/combined`) | `serve(ServerConfig, shutdown)` embeds the remote desktop service. The caller supplies a multithreaded Tokio runtime and shutdown future. The default feature enables both protocols. Disable default features for Apple alone. |
+| `apple-screen-sharing` | `Config` and `serve` provide the RFB server. Attach `HpServer` with your own `ExternalScreen` and `EncoderFactory` for High Performance. |
+| `vvv-apple` and `vvv-nvenc` | `configure_video` connects a host framebuffer to standard and NVENC High Performance video. |
 | `vvv-rdp` (`crates/ironrdp`) | `start_on`, `Receiver` and the input callback embed an RDP endpoint directly. Supply captured frames, cursor updates and guest input handling. |
 | `vvv-session` | `ViewerSeat` coordinates control, resize preferences, observer views and ownership changes across protocol adapters. |
 | `wayland-capture` | `CaptureSink` receives guest frames and cursor planes from the crosvm Wayland socket. |
 | `cuda-scanout` | Rust frame and CUDA IPC APIs plus the presenter shared library for the crosvm GPU hook. |
 
-Use local Cargo path dependencies. These demo APIs may change. Build the workspace once before depending on `vvv-remote` so its pinned WayShare source and generated bindings are present. The receiver CLI and SDK use the same server implementation. A runnable [embedding example](crates/combined/examples/embed.rs) starts the service with caller-managed shutdown.
+Use local Cargo path dependencies. These demo APIs may change. Cargo generates NVENC bindings in its build directory when compiling the SDK. The receiver CLI and SDK use the same server implementation. A runnable [embedding example](crates/combined/examples/embed.rs) starts the service with caller-managed shutdown.
 
 ## Remote desktop behavior
 
@@ -37,7 +39,7 @@ One Apple viewer and multiple RDP viewers can share a guest. The primary control
 
 Both NVENC encoders default to 8 Mbps CBR per stream. Set `--avg-bitrate BPS` on `vvv serve` to override it. Supported GPU surfaces go directly to the encoder after device-side conversion. Software and legacy bitmap paths can use CPU copies. Apple audio currently carries silence.
 
-The combined receiver defaults to loopback. To test over a trusted LAN, pass `-- --listen HOST_IP:5990`. Apple uses TCP 5990 for control and UDP 5992/5994 for media. RDP defaults to TCP 3389. Apple accepts arbitrary credentials only with `--dev-login`. Configure an SRP verifier with `vvv set-password --session NAME -- --user USER` for password verification. RDP accepts development connections without credentials even when Apple uses SRP. Standalone RDP binds all IPv4 interfaces.
+The combined receiver defaults to loopback. To test over a trusted LAN, pass `-- --listen HOST_IP:5990`. Apple uses TCP 5990 for control and UDP 5992/5994 for media. RDP defaults to TCP 3389. Apple accepts arbitrary credentials only with `--dev-login`. Configure an SRP verifier with `vvv set-password --session NAME -- --user USER` for password verification. RDP accepts development connections without credentials even when Apple uses SRP. The workspace launcher preserves the RDP-only mode’s all-IPv4 bind. Pass `-- --listen [::]:5990` for a dual-stack address. All three modes use the same receiver executable.
 
 Protocol details are in the [RDP notes](crates/ironrdp/README.md) and [Apple notes](crates/apple/README.md).
 
